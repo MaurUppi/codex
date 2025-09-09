@@ -5,7 +5,7 @@ use std::time::Instant;
 fn test_statusengine_creation() {
     let config = StatusEngineConfig::default();
     let engine = StatusEngine::new(config);
-    assert_eq!(engine.line2_items().len(), 7);
+    assert_eq!(engine.line2_items().len(), 6);
     assert_eq!(engine.line2_items()[0], StatusItem::Model);
 }
 

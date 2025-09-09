@@ -1935,6 +1935,7 @@ async fn run_compact_task(
                         msg: EventMsg::Error(ErrorEvent {
                             message: e.to_string(),
                         }),
+                        since_session_ms: None,
                     };
                     sess.send_event(event).await;
                     return;
@@ -1955,6 +1956,7 @@ async fn run_compact_task(
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "Compact task completed".to_string(),
         }),
+        since_session_ms: None,
     };
     sess.send_event(event).await;
     let event = Event {
@@ -1962,6 +1964,7 @@ async fn run_compact_task(
         msg: EventMsg::TaskComplete(TaskCompleteEvent {
             last_agent_message: None,
         }),
+        since_session_ms: None,
     };
     sess.send_event(event).await;
 }
@@ -2072,6 +2075,7 @@ async fn handle_response_item(
                 let event = Event {
                     id: sub_id.to_string(),
                     msg,
+                    since_session_ms: None,
                 };
                 sess.tx_event.send(event).await.ok();
             }
@@ -2922,6 +2926,7 @@ async fn drain_to_completed(
                     .send(Event {
                         id: sub_id.to_string(),
                         msg: EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
+                        since_session_ms: None,
                     })
                     .await
                     .ok();

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
+use tracing;
 
 /// Configuration for the StatusEngine
 #[derive(Debug, Clone)]
@@ -41,7 +42,6 @@ pub enum StatusItem {
     Effort,
     WorkspaceName,
     GitBranch,
-    GitCounts,
     Sandbox,
     Approval,
 }
@@ -81,14 +81,27 @@ pub struct StatusEngine {
 
 impl StatusEngine {
     /// Create a new StatusEngine with the given configuration
-    pub fn new(config: StatusEngineConfig) -> Self {
+    pub fn new(mut config: StatusEngineConfig) -> Self {
+        // Validate and clamp configuration values
+
+        // Clamp command timeout to reasonable range (150-500ms as per assessment)
+        config.command_timeout_ms = config.command_timeout_ms.clamp(150, 500);
+
+        // Validate provider type with fallback to "builtin"
+        if config.provider != "command" && config.provider != "builtin" {
+            tracing::debug!(
+                "StatusEngine: invalid provider '{}', falling back to 'builtin'",
+                config.provider
+            );
+            config.provider = "builtin".to_string();
+        }
+
         // Default order from the requirement
         let default_items = vec![
             StatusItem::Model,
             StatusItem::Effort,
             StatusItem::WorkspaceName,
             StatusItem::GitBranch,
-            StatusItem::GitCounts,
             StatusItem::Sandbox,
             StatusItem::Approval,
         ];
@@ -118,6 +131,11 @@ impl StatusEngine {
     /// Get the current Line 2 items (for testing)
     pub fn line2_items(&self) -> &[StatusItem] {
         &self.line2_items
+    }
+
+    /// Apply consistent styling to status line text
+    fn style_status_line(text: String) -> String {
+        text.dim().to_string()
     }
 
     /// Tick the engine and produce status output
@@ -161,9 +179,6 @@ impl StatusEngine {
                         parts.push(git_part);
                     }
                 }
-                StatusItem::GitCounts => {
-                    // This is handled in GitBranch to avoid duplication
-                }
                 StatusItem::Sandbox => {
                     if let Some(ref sandbox) = self.state.sandbox {
                         parts.push(sandbox.clone());
@@ -177,11 +192,11 @@ impl StatusEngine {
             }
         }
 
-        // Join with " | " separator and apply dim styling
+        // Join with " | " separator and apply consistent styling
         if parts.is_empty() {
             String::new()
         } else {
-            parts.join(" | ").dim().to_string()
+            Self::style_status_line(parts.join(" | "))
         }
     }
 
@@ -196,9 +211,15 @@ impl StatusEngine {
         // Check if we're in backoff period
         if let Some(backoff_until) = self.backoff_until {
             if now < backoff_until {
+                tracing::debug!(
+                    "StatusEngine command provider in backoff period, using cached result"
+                );
                 return self.last_line3.clone();
             } else {
                 // Backoff period expired, clear it
+                tracing::debug!(
+                    "StatusEngine backoff period expired, resuming command provider calls"
+                );
                 self.backoff_until = None;
             }
         }
@@ -209,6 +230,7 @@ impl StatusEngine {
 
         if let Some(last_run) = self.last_command_run {
             if now.duration_since(last_run) < effective_cooldown {
+                tracing::debug!("StatusEngine command provider throttled, using cached result");
                 return self.last_line3.clone();
             }
         }
@@ -216,18 +238,21 @@ impl StatusEngine {
         // Run the command
         match self.run_command_provider().await {
             Ok(Some(output)) => {
+                tracing::debug!("StatusEngine command provider succeeded, got output");
                 self.last_command_run = Some(now);
                 self.last_line3 = Some(output.clone());
                 self.consecutive_failures = 0; // Reset failure count on success
                 Some(output)
             }
             Ok(None) => {
+                tracing::debug!("StatusEngine command provider returned empty result");
                 self.last_command_run = Some(now);
                 self.consecutive_failures = 0; // Empty result is not a failure
                 // Keep last good output on empty result
                 self.last_line3.clone()
             }
-            Err(_) => {
+            Err(e) => {
+                tracing::debug!("StatusEngine command provider error: {}", e);
                 self.last_command_run = Some(now);
                 self.consecutive_failures += 1;
 
@@ -236,6 +261,11 @@ impl StatusEngine {
                     let backoff_ms =
                         std::cmp::min(5000, 1000 * (1 << (self.consecutive_failures - 3)));
                     self.backoff_until = Some(now + Duration::from_millis(backoff_ms));
+                    tracing::debug!(
+                        "StatusEngine entering backoff mode for {}ms after {} consecutive failures",
+                        backoff_ms,
+                        self.consecutive_failures
+                    );
                 }
 
                 // Keep last good output on error
@@ -259,6 +289,10 @@ impl StatusEngine {
 
         // Spawn the command with timeout and proper cleanup
         let timeout_duration = Duration::from_millis(self.config.command_timeout_ms);
+        tracing::debug!(
+            "StatusEngine spawning command provider with timeout {}ms",
+            self.config.command_timeout_ms
+        );
 
         let mut child = Command::new(command_path)
             .stdin(Stdio::piped())
@@ -299,6 +333,7 @@ impl StatusEngine {
             Ok(Err(e)) => Err(e.into()),
             Err(_) => {
                 // Timeout occurred - kill the child process explicitly
+                tracing::debug!("StatusEngine command provider timed out, killing child process");
                 let _ = child.kill().await;
                 let _ = child.wait().await; // Reap the process
                 Ok(None) // Return None to keep last good output
@@ -335,10 +370,9 @@ impl StatusEngine {
                     "current_dir".to_string(),
                     serde_json::Value::String(cwd.display().to_string()),
                 );
-                workspace_obj.insert(
-                    "project_dir".to_string(),
-                    serde_json::Value::String(cwd.display().to_string()),
-                );
+                // Only add project_dir if it differs from current_dir
+                // In the current implementation they're the same, so we omit project_dir
+                // to avoid duplication as recommended in the assessment
             }
             payload.insert(
                 "workspace".to_string(),
@@ -474,9 +508,6 @@ impl StatusEngine {
                         parts.push(git_part);
                     }
                 }
-                StatusItem::GitCounts => {
-                    // This is handled in GitBranch to avoid duplication
-                }
                 StatusItem::Sandbox => {
                     if let Some(ref sandbox) = self.state.sandbox {
                         parts.push(sandbox.clone());
@@ -497,11 +528,9 @@ impl StatusEngine {
             let result = parts.join(" | ");
             // If still too long after branch truncation, truncate the whole line as fallback
             if result.len() > max_width {
-                Self::truncate_with_ellipsis(&result, max_width)
-                    .dim()
-                    .to_string()
+                Self::style_status_line(Self::truncate_with_ellipsis(&result, max_width))
             } else {
-                result.dim().to_string()
+                Self::style_status_line(result)
             }
         }
     }
