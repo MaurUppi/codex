@@ -1245,6 +1245,33 @@ impl ChatComposer {
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
         self.esc_backtrack_hint = show;
     }
+
+    /// Update StatusEngine output for footer display
+    pub(crate) fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
+        self.statusengine_output = output;
+    }
+
+    /// Render StatusEngine lines in the footer
+    fn render_statusengine_lines(&self, area: Rect, buf: &mut Buffer) {
+        if area.height >= 2 {
+            let [line2_rect, line3_rect] =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+
+            if let Some(ref output) = self.statusengine_output {
+                // Render Line 2
+                Line::from(output.line2.clone())
+                    .style(Style::default().dim())
+                    .render_ref(line2_rect, buf);
+
+                // Render Line 3 (optional)
+                if let Some(ref line3) = output.line3 {
+                    Line::from(line3.clone())
+                        .style(Style::default().dim())
+                        .render_ref(line3_rect, buf);
+                }
+            }
+        }
+    }
 }
 
 impl WidgetRef for ChatComposer {
@@ -1378,33 +1405,6 @@ impl WidgetRef for ChatComposer {
             Line::from(self.placeholder_text.as_str())
                 .style(Style::default().dim())
                 .render_ref(textarea_rect.inner(Margin::new(1, 0)), buf);
-        }
-    }
-
-    /// Update StatusEngine output for footer display
-    pub(crate) fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
-        self.statusengine_output = output;
-    }
-
-    /// Render StatusEngine lines in the footer
-    fn render_statusengine_lines(&self, area: Rect, buf: &mut Buffer) {
-        if area.height >= 2 {
-            let [line2_rect, line3_rect] =
-                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-
-            if let Some(ref output) = self.statusengine_output {
-                // Render Line 2
-                Line::from(output.line2.clone())
-                    .style(Style::default().dim())
-                    .render_ref(line2_rect, buf);
-
-                // Render Line 3 (optional)
-                if let Some(ref line3) = output.line3 {
-                    Line::from(line3.clone())
-                        .style(Style::default().dim())
-                        .render_ref(line3_rect, buf);
-                }
-            }
         }
     }
 }
