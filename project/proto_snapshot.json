@@ -1,0 +1,13 @@
+{
+  "session": {
+    "type": "session_configured",
+    "session_id": "a9fa39c0-c098-48ea-8ae8-f65888593e7c",
+    "model": "gpt-5",
+    "history_log_id": 34042052,
+    "history_entry_count": 309
+  },
+  "final_message": "我是你的编码与自动化助手（Codex CLI）。我能阅读/修改项目文件、生成代码、修复测试、制定并执行计划，并在关键操作前征求确认；也可在不触碰本地环境时提供思路与示例。\n\n示例：倒序“今天写代码很顺利” → “利顺很码代写天今”",
+  "token_usage": null,
+  "deltas": "我是你的编码与自动化助手（Codex CLI）。我能阅读/修改项目文件、生成代码、修复测试、制定并执行计划，并在关键操作前征求确认；也可在不触碰本地环境时提供思路与示例。\n\n示例：倒序“今天写代码很顺利” → “利顺很码代写天今”",
+  "completed": true
+}

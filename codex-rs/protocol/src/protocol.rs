@@ -402,6 +402,11 @@ pub struct Event {
     pub id: String,
     /// Payload
     pub msg: EventMsg,
+    /// Monotonic milliseconds since the most recent `SessionConfigured` event
+    /// for this session. Optional for backward compatibility; producers should
+    /// populate this for all events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_session_ms: Option<u64>,
 }
 
 /// Response event from the agent

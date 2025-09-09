@@ -497,6 +497,57 @@ pub fn resolve_root_git_project_for_trust(cwd: &Path) -> Option<PathBuf> {
     git_dir_path.parent().map(Path::to_path_buf)
 }
 
+/// Get working directory diff counts (+added, -removed) against HEAD.
+/// Returns None on timeout/error to avoid blocking the UI.
+/// This is a best-effort operation used by StatusEngine.
+pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
+    // Verify we're in a git repo
+    get_git_repo_root(cwd)?;
+
+    // Get staged + unstaged changes via git diff --numstat
+    let diff_result = run_git_command_with_timeout(&["diff", "--numstat", "HEAD"], cwd).await;
+    
+    let mut added = 0u64;
+    let mut removed = 0u64;
+
+    if let Some(output) = diff_result {
+        if output.status.success() {
+            let diff_output = String::from_utf8_lossy(&output.stdout);
+            for line in diff_output.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    // Format: "added\tremoved\tfilename"
+                    if let (Ok(add), Ok(rem)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                        added += add;
+                        removed += rem;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check for untracked files and count them as additions
+    let untracked_result = run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await;
+    
+    if let Some(output) = untracked_result {
+        if output.status.success() {
+            let untracked_output = String::from_utf8_lossy(&output.stdout);
+            let untracked_count = untracked_output.lines().count() as u64;
+            
+            // For untracked files, we estimate lines by counting files
+            // This is imperfect but better than ignoring untracked files entirely
+            added += untracked_count * 10; // Rough estimate: 10 lines per new file
+        }
+    }
+
+    // Return counts only if we have any changes
+    if added > 0 || removed > 0 {
+        Some((added, removed))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

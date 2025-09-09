@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::AuthManager;
 use crate::event_mapping::map_response_item_to_event_messages;
@@ -291,6 +292,8 @@ pub(crate) struct Session {
     codex_linux_sandbox_exe: Option<PathBuf>,
     user_shell: shell::Shell,
     show_raw_agent_reasoning: bool,
+    /// Monotonic clock origin for computing `since_session_ms`.
+    session_origin: Instant,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -394,7 +397,7 @@ impl Session {
         };
 
         // Error messages to dispatch after SessionConfigured is sent.
-        let mut post_session_configured_error_events = Vec::<Event>::new();
+        let mut post_session_configured_error_events = Vec::<EventMsg>::new();
 
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
@@ -428,10 +431,8 @@ impl Session {
             Err(e) => {
                 let message = format!("Failed to create MCP connection manager: {e:#}");
                 error!("{message}");
-                post_session_configured_error_events.push(Event {
-                    id: INITIAL_SUBMIT_ID.to_owned(),
-                    msg: EventMsg::Error(ErrorEvent { message }),
-                });
+                post_session_configured_error_events
+                    .push(EventMsg::Error(ErrorEvent { message }));
                 (McpConnectionManager::default(), Default::default())
             }
         };
@@ -441,10 +442,8 @@ impl Session {
             for (server_name, err) in failed_clients {
                 let message = format!("MCP client for `{server_name}` failed to start: {err:#}");
                 error!("{message}");
-                post_session_configured_error_events.push(Event {
-                    id: INITIAL_SUBMIT_ID.to_owned(),
-                    msg: EventMsg::Error(ErrorEvent { message }),
-                });
+                post_session_configured_error_events
+                    .push(EventMsg::Error(ErrorEvent { message }));
             }
         }
 
@@ -489,6 +488,7 @@ impl Session {
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            session_origin: Instant::now(),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -501,21 +501,22 @@ impl Session {
             }
         };
 
-        let events = std::iter::once(Event {
-            id: INITIAL_SUBMIT_ID.to_owned(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+        // Emit SessionConfigured first (since_session_ms will be ~0),
+        // followed by any startup error messages.
+        sess.emit(
+            INITIAL_SUBMIT_ID.to_owned(),
+            EventMsg::SessionConfigured(SessionConfiguredEvent {
                 session_id: conversation_id,
                 model,
                 history_log_id,
                 history_entry_count,
                 initial_messages,
             }),
-        })
-        .chain(post_session_configured_error_events.into_iter());
-        for event in events {
-            if let Err(e) = tx_event.send(event).await {
-                error!("failed to send event: {e:?}");
-            }
+        )
+        .await;
+
+        for msg in post_session_configured_error_events.into_iter() {
+            sess.emit(INITIAL_SUBMIT_ID.to_owned(), msg).await;
         }
 
         Ok((sess, turn_context))
@@ -591,10 +592,33 @@ impl Session {
 
     /// Sends the given event to the client and swallows the send event, if
     /// any, logging it as an error.
-    pub(crate) async fn send_event(&self, event: Event) {
+    pub(crate) async fn send_event(&self, mut event: Event) {
+        // Attach timing if missing.
+        if event.since_session_ms.is_none() {
+            event.since_session_ms = Some(self.since_session_ms_now());
+        }
         if let Err(e) = self.tx_event.send(event).await {
             error!("failed to send tool call event: {e}");
         }
+    }
+
+    /// Compute monotonic milliseconds since `session_origin`.
+    fn since_session_ms_now(&self) -> u64 {
+        self.session_origin.elapsed().as_millis() as u64
+    }
+
+    /// Convenience to build an Event with timing set.
+    fn timed_event(&self, id: String, msg: EventMsg) -> Event {
+        Event {
+            id,
+            msg,
+            since_session_ms: Some(self.since_session_ms_now()),
+        }
+    }
+
+    /// Emit a timed Event immediately.
+    async fn emit(&self, id: String, msg: EventMsg) {
+        let _ = self.tx_event.send(self.timed_event(id, msg)).await;
     }
 
     pub async fn request_command_approval(
@@ -616,15 +640,15 @@ impl Session {
             warn!("Overwriting existing pending approval for sub_id: {event_id}");
         }
 
-        let event = Event {
-            id: event_id,
-            msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+        let event = self.timed_event(
+            event_id,
+            EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
                 call_id,
                 command,
                 cwd,
                 reason,
             }),
-        };
+        );
         let _ = self.tx_event.send(event).await;
         rx_approve
     }
@@ -648,15 +672,15 @@ impl Session {
             warn!("Overwriting existing pending approval for sub_id: {event_id}");
         }
 
-        let event = Event {
-            id: event_id,
-            msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
+        let event = self.timed_event(
+            event_id,
+            EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                 call_id,
                 changes: convert_apply_patch_to_protocol(action),
                 reason,
                 grant_root,
             }),
-        };
+        );
         let _ = self.tx_event.send(event).await;
         rx_approve
     }
@@ -749,10 +773,7 @@ impl Session {
                     .collect(),
             }),
         };
-        let event = Event {
-            id: sub_id.to_string(),
-            msg,
-        };
+        let event = self.timed_event(sub_id.to_string(), msg);
         let _ = self.tx_event.send(event).await;
     }
 
@@ -796,10 +817,7 @@ impl Session {
             })
         };
 
-        let event = Event {
-            id: sub_id.to_string(),
-            msg,
-        };
+        let event = self.timed_event(sub_id.to_string(), msg);
         let _ = self.tx_event.send(event).await;
 
         // If this is an apply_patch, after we emit the end patch, emit a second event
@@ -808,10 +826,7 @@ impl Session {
             let unified_diff = turn_diff_tracker.get_unified_diff();
             if let Ok(Some(unified_diff)) = unified_diff {
                 let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-                let event = Event {
-                    id: sub_id.into(),
-                    msg,
-                };
+                let event = self.timed_event(sub_id.into(), msg);
                 let _ = self.tx_event.send(event).await;
             }
         }
@@ -872,22 +887,22 @@ impl Session {
     /// the call‑sites terse so adding more diagnostics does not clutter the
     /// core agent logic.
     async fn notify_background_event(&self, sub_id: &str, message: impl Into<String>) {
-        let event = Event {
-            id: sub_id.to_string(),
-            msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+        let event = self.timed_event(
+            sub_id.to_string(),
+            EventMsg::BackgroundEvent(BackgroundEventEvent {
                 message: message.into(),
             }),
-        };
+        );
         let _ = self.tx_event.send(event).await;
     }
 
     async fn notify_stream_error(&self, sub_id: &str, message: impl Into<String>) {
-        let event = Event {
-            id: sub_id.to_string(),
-            msg: EventMsg::StreamError(StreamErrorEvent {
+        let event = self.timed_event(
+            sub_id.to_string(),
+            EventMsg::StreamError(StreamErrorEvent {
                 message: message.into(),
             }),
-        };
+        );
         let _ = self.tx_event.send(event).await;
     }
 
@@ -1047,10 +1062,9 @@ impl AgentTask {
         // TOCTOU?
         if !self.handle.is_finished() {
             self.handle.abort();
-            let event = Event {
-                id: self.sub_id,
-                msg: EventMsg::TurnAborted(TurnAbortedEvent { reason }),
-            };
+            let event = self
+                .sess
+                .timed_event(self.sub_id, EventMsg::TurnAborted(TurnAbortedEvent { reason }));
             let tx_event = self.sess.tx_event.clone();
             tokio::spawn(async move {
                 tx_event.send(event).await.ok();
@@ -1258,8 +1272,8 @@ async fn submission_loop(
 
             Op::GetHistoryEntryRequest { offset, log_id } => {
                 let config = config.clone();
-                let tx_event = sess.tx_event.clone();
                 let sub_id = sub.id.clone();
+                let sess2 = sess.clone();
 
                 tokio::spawn(async move {
                     // Run lookup in blocking thread because it does file IO + locking.
@@ -1269,9 +1283,9 @@ async fn submission_loop(
                     .await
                     .unwrap_or(None);
 
-                    let event = Event {
-                        id: sub_id,
-                        msg: EventMsg::GetHistoryEntryResponse(
+                    let event = sess2.timed_event(
+                        sub_id,
+                        EventMsg::GetHistoryEntryResponse(
                             crate::protocol::GetHistoryEntryResponseEvent {
                                 offset,
                                 log_id,
@@ -1284,31 +1298,31 @@ async fn submission_loop(
                                 }),
                             },
                         ),
-                    };
+                    );
 
-                    if let Err(e) = tx_event.send(event).await {
+                    if let Err(e) = sess2.tx_event.send(event).await {
                         warn!("failed to send GetHistoryEntryResponse event: {e}");
                     }
                 });
             }
             Op::ListMcpTools => {
-                let tx_event = sess.tx_event.clone();
+                let sess2 = sess.clone();
                 let sub_id = sub.id.clone();
 
                 // This is a cheap lookup from the connection manager's cache.
                 let tools = sess.mcp_connection_manager.list_all_tools();
-                let event = Event {
-                    id: sub_id,
-                    msg: EventMsg::McpListToolsResponse(
+                let event = sess2.timed_event(
+                    sub_id,
+                    EventMsg::McpListToolsResponse(
                         crate::protocol::McpListToolsResponseEvent { tools },
                     ),
-                };
-                if let Err(e) = tx_event.send(event).await {
+                );
+                if let Err(e) = sess2.tx_event.send(event).await {
                     warn!("failed to send McpListToolsResponse event: {e}");
                 }
             }
             Op::ListCustomPrompts => {
-                let tx_event = sess.tx_event.clone();
+                let sess2 = sess.clone();
                 let sub_id = sub.id.clone();
 
                 let custom_prompts: Vec<CustomPrompt> =
@@ -1318,13 +1332,13 @@ async fn submission_loop(
                         Vec::new()
                     };
 
-                let event = Event {
-                    id: sub_id,
-                    msg: EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
+                let event = sess2.timed_event(
+                    sub_id,
+                    EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
                         custom_prompts,
                     }),
-                };
-                if let Err(e) = tx_event.send(event).await {
+                );
+                if let Err(e) = sess2.tx_event.send(event).await {
                     warn!("failed to send ListCustomPromptsResponse event: {e}");
                 }
             }
@@ -1356,38 +1370,35 @@ async fn submission_loop(
                     && let Err(e) = rec.shutdown().await
                 {
                     warn!("failed to shutdown rollout recorder: {e}");
-                    let event = Event {
-                        id: sub.id.clone(),
-                        msg: EventMsg::Error(ErrorEvent {
+                    let event = sess.timed_event(
+                        sub.id.clone(),
+                        EventMsg::Error(ErrorEvent {
                             message: "Failed to shutdown rollout recorder".to_string(),
                         }),
-                    };
+                    );
                     if let Err(e) = sess.tx_event.send(event).await {
                         warn!("failed to send error message: {e:?}");
                     }
                 }
 
-                let event = Event {
-                    id: sub.id.clone(),
-                    msg: EventMsg::ShutdownComplete,
-                };
+                let event = sess.timed_event(sub.id.clone(), EventMsg::ShutdownComplete);
                 if let Err(e) = sess.tx_event.send(event).await {
                     warn!("failed to send Shutdown event: {e}");
                 }
                 break;
             }
             Op::GetHistory => {
-                let tx_event = sess.tx_event.clone();
+                let sess2 = sess.clone();
                 let sub_id = sub.id.clone();
 
-                let event = Event {
-                    id: sub_id.clone(),
-                    msg: EventMsg::ConversationHistory(ConversationHistoryResponseEvent {
-                        conversation_id: sess.conversation_id,
-                        entries: sess.state.lock_unchecked().history.contents(),
+                let event = sess2.timed_event(
+                    sub_id.clone(),
+                    EventMsg::ConversationHistory(ConversationHistoryResponseEvent {
+                        conversation_id: sess2.conversation_id,
+                        entries: sess2.state.lock_unchecked().history.contents(),
                     }),
-                };
-                if let Err(e) = tx_event.send(event).await {
+                );
+                if let Err(e) = sess2.tx_event.send(event).await {
                     warn!("failed to send ConversationHistory event: {e}");
                 }
             }
@@ -1421,12 +1432,12 @@ async fn run_task(
     if input.is_empty() {
         return;
     }
-    let event = Event {
-        id: sub_id.clone(),
-        msg: EventMsg::TaskStarted(TaskStartedEvent {
+    let event = sess.timed_event(
+        sub_id.clone(),
+        EventMsg::TaskStarted(TaskStartedEvent {
             model_context_window: turn_context.client.get_model_context_window(),
         }),
-    };
+    );
     if sess.tx_event.send(event).await.is_err() {
         return;
     }
@@ -1595,12 +1606,12 @@ async fn run_task(
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
-                let event = Event {
-                    id: sub_id.clone(),
-                    msg: EventMsg::Error(ErrorEvent {
+                let event = sess.timed_event(
+                    sub_id.clone(),
+                    EventMsg::Error(ErrorEvent {
                         message: e.to_string(),
                     }),
-                };
+                );
                 sess.tx_event.send(event).await.ok();
                 // let the user continue the conversation
                 break;
@@ -1608,10 +1619,10 @@ async fn run_task(
         }
     }
     sess.remove_task(&sub_id);
-    let event = Event {
-        id: sub_id,
-        msg: EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }),
-    };
+    let event = sess.timed_event(
+        sub_id,
+        EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }),
+    );
     sess.tx_event.send(event).await.ok();
 }
 
@@ -1790,10 +1801,10 @@ async fn try_run_turn(
             ResponseEvent::WebSearchCallBegin { call_id } => {
                 let _ = sess
                     .tx_event
-                    .send(Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::WebSearchBegin(WebSearchBeginEvent { call_id }),
-                    })
+                    .send(sess.timed_event(
+                        sub_id.to_string(),
+                        EventMsg::WebSearchBegin(WebSearchBeginEvent { call_id }),
+                    ))
                     .await;
             }
             ResponseEvent::Completed {
@@ -1810,11 +1821,12 @@ async fn try_run_turn(
                     st.token_info = info.clone();
                     info
                 };
-                sess.tx_event
-                    .send(Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
-                    })
+                sess
+                    .tx_event
+                    .send(sess.timed_event(
+                        sub_id.to_string(),
+                        EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
+                    ))
                     .await
                     .ok();
 
@@ -1824,6 +1836,7 @@ async fn try_run_turn(
                     let event = Event {
                         id: sub_id.to_string(),
                         msg,
+                        since_session_ms: None, // Will be filled by send_event
                     };
                     let _ = sess.tx_event.send(event).await;
                 }
@@ -1831,34 +1844,34 @@ async fn try_run_turn(
                 return Ok(output);
             }
             ResponseEvent::OutputTextDelta(delta) => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
-                };
+                let event = sess.timed_event(
+                    sub_id.to_string(),
+                    EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
+                );
                 sess.tx_event.send(event).await.ok();
             }
             ResponseEvent::ReasoningSummaryDelta(delta) => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
-                };
+                let event = sess.timed_event(
+                    sub_id.to_string(),
+                    EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
+                );
                 sess.tx_event.send(event).await.ok();
             }
             ResponseEvent::ReasoningSummaryPartAdded => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {}),
-                };
+                let event = sess.timed_event(
+                    sub_id.to_string(),
+                    EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {}),
+                );
                 sess.tx_event.send(event).await.ok();
             }
             ResponseEvent::ReasoningContentDelta(delta) => {
                 if sess.show_raw_agent_reasoning {
-                    let event = Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::AgentReasoningRawContentDelta(
+                    let event = sess.timed_event(
+                        sub_id.to_string(),
+                        EventMsg::AgentReasoningRawContentDelta(
                             AgentReasoningRawContentDeltaEvent { delta },
                         ),
-                    };
+                    );
                     sess.tx_event.send(event).await.ok();
                 }
             }
@@ -1874,12 +1887,12 @@ async fn run_compact_task(
     compact_instructions: String,
 ) {
     let model_context_window = turn_context.client.get_model_context_window();
-    let start_event = Event {
-        id: sub_id.clone(),
-        msg: EventMsg::TaskStarted(TaskStartedEvent {
+    let start_event = sess.timed_event(
+        sub_id.clone(),
+        EventMsg::TaskStarted(TaskStartedEvent {
             model_context_window,
         }),
-    };
+    );
     if sess.tx_event.send(start_event).await.is_err() {
         return;
     }

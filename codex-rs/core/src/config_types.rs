@@ -78,7 +78,16 @@ pub enum HistoryPersistence {
 
 /// Collection of settings that are specific to the TUI.
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct Tui {}
+pub struct Tui {
+    /// Enable StatusEngine feature for footer status display
+    pub statusengine: Option<bool>,
+    /// Provider type for Line 3: "command" or "builtin"
+    pub provider: Option<String>,
+    /// Path to external command provider (used when provider = "command")
+    pub command: Option<String>,
+    /// Timeout for command provider in milliseconds (150-500ms typical)
+    pub command_timeout_ms: Option<u64>,
+}
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct SandboxWorkspaceWrite {

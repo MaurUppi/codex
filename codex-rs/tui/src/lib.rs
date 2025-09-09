@@ -54,6 +54,7 @@ mod session_log;
 mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
+mod statusengine;
 mod streaming;
 mod text_formatting;
 mod tui;
