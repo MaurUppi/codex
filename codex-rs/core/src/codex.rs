@@ -431,8 +431,7 @@ impl Session {
             Err(e) => {
                 let message = format!("Failed to create MCP connection manager: {e:#}");
                 error!("{message}");
-                post_session_configured_error_events
-                    .push(EventMsg::Error(ErrorEvent { message }));
+                post_session_configured_error_events.push(EventMsg::Error(ErrorEvent { message }));
                 (McpConnectionManager::default(), Default::default())
             }
         };
@@ -442,8 +441,7 @@ impl Session {
             for (server_name, err) in failed_clients {
                 let message = format!("MCP client for `{server_name}` failed to start: {err:#}");
                 error!("{message}");
-                post_session_configured_error_events
-                    .push(EventMsg::Error(ErrorEvent { message }));
+                post_session_configured_error_events.push(EventMsg::Error(ErrorEvent { message }));
             }
         }
 
@@ -1062,9 +1060,10 @@ impl AgentTask {
         // TOCTOU?
         if !self.handle.is_finished() {
             self.handle.abort();
-            let event = self
-                .sess
-                .timed_event(self.sub_id, EventMsg::TurnAborted(TurnAbortedEvent { reason }));
+            let event = self.sess.timed_event(
+                self.sub_id,
+                EventMsg::TurnAborted(TurnAbortedEvent { reason }),
+            );
             let tx_event = self.sess.tx_event.clone();
             tokio::spawn(async move {
                 tx_event.send(event).await.ok();
@@ -1313,9 +1312,9 @@ async fn submission_loop(
                 let tools = sess.mcp_connection_manager.list_all_tools();
                 let event = sess2.timed_event(
                     sub_id,
-                    EventMsg::McpListToolsResponse(
-                        crate::protocol::McpListToolsResponseEvent { tools },
-                    ),
+                    EventMsg::McpListToolsResponse(crate::protocol::McpListToolsResponseEvent {
+                        tools,
+                    }),
                 );
                 if let Err(e) = sess2.tx_event.send(event).await {
                     warn!("failed to send McpListToolsResponse event: {e}");
@@ -1821,8 +1820,7 @@ async fn try_run_turn(
                     st.token_info = info.clone();
                     info
                 };
-                sess
-                    .tx_event
+                sess.tx_event
                     .send(sess.timed_event(
                         sub_id.to_string(),
                         EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),

@@ -500,13 +500,16 @@ pub fn resolve_root_git_project_for_trust(cwd: &Path) -> Option<PathBuf> {
 /// Get working directory diff counts (+added, -removed) against HEAD.
 /// Returns None on timeout/error to avoid blocking the UI.
 /// This is a best-effort operation used by StatusEngine.
+///
+/// Note: Line counts for untracked files are estimated based on file size
+/// and should be treated as approximate values, not exact counts.
 pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
     // Verify we're in a git repo
     get_git_repo_root(cwd)?;
 
     // Get staged + unstaged changes via git diff --numstat
     let diff_result = run_git_command_with_timeout(&["diff", "--numstat", "HEAD"], cwd).await;
-    
+
     let mut added = 0u64;
     let mut removed = 0u64;
 
@@ -526,17 +529,35 @@ pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
         }
     }
 
-    // Also check for untracked files and count them as additions
-    let untracked_result = run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await;
-    
+    // Also check for untracked files and estimate their contribution more accurately
+    let untracked_result =
+        run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await;
+
     if let Some(output) = untracked_result {
         if output.status.success() {
             let untracked_output = String::from_utf8_lossy(&output.stdout);
-            let untracked_count = untracked_output.lines().count() as u64;
-            
-            // For untracked files, we estimate lines by counting files
-            // This is imperfect but better than ignoring untracked files entirely
-            added += untracked_count * 10; // Rough estimate: 10 lines per new file
+            let untracked_files: Vec<&str> = untracked_output.lines().collect();
+
+            if !untracked_files.is_empty() && untracked_files.len() <= 50 {
+                // For small numbers of untracked files, try to get actual line counts
+                let mut untracked_lines = 0u64;
+                for file_path in &untracked_files {
+                    let file_full_path = cwd.join(file_path);
+                    if let Ok(metadata) = std::fs::metadata(&file_full_path) {
+                        if metadata.is_file() {
+                            // Use byte size as a rough proxy for line count
+                            // Assume ~50 chars per line average (reasonable for code)
+                            untracked_lines += (metadata.len() / 50).max(1);
+                        }
+                    }
+                }
+                added += untracked_lines;
+            } else if untracked_files.len() > 50 {
+                // For large numbers of untracked files, use a more conservative estimate
+                // to avoid misleading numbers in repositories with many large files
+                let untracked_count = untracked_files.len() as u64;
+                added += untracked_count * 5; // More conservative estimate: 5 lines per file
+            }
         }
     }
 

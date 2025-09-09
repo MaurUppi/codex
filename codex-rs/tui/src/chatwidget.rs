@@ -66,6 +66,7 @@ use crate::history_cell::ExecCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PatchEventType;
 use crate::slash_command::SlashCommand;
+use crate::statusengine::StatusEngineOutput;
 use crate::tui::FrameRequester;
 // streaming internals are provided by crate::streaming and crate::markdown_stream
 use crate::user_approval_widget::ApprovalRequest;
@@ -101,6 +102,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_prompt: Option<String>,
     pub(crate) initial_images: Vec<PathBuf>,
     pub(crate) enhanced_keys_supported: bool,
+    pub(crate) statusengine_enabled: bool,
 }
 
 pub(crate) struct ChatWidget {
@@ -630,6 +632,7 @@ impl ChatWidget {
             initial_prompt,
             initial_images,
             enhanced_keys_supported,
+            statusengine_enabled,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -646,6 +649,7 @@ impl ChatWidget {
                 enhanced_keys_supported,
                 placeholder_text: placeholder,
                 disable_paste_burst: config.disable_paste_burst,
+                statusengine_enabled,
             }),
             active_exec_cell: None,
             config: config.clone(),
@@ -680,6 +684,7 @@ impl ChatWidget {
             initial_prompt,
             initial_images,
             enhanced_keys_supported,
+            statusengine_enabled,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -698,6 +703,7 @@ impl ChatWidget {
                 enhanced_keys_supported,
                 placeholder_text: placeholder,
                 disable_paste_burst: config.disable_paste_burst,
+                statusengine_enabled,
             }),
             active_exec_cell: None,
             config: config.clone(),
@@ -1373,6 +1379,11 @@ impl ChatWidget {
     pub(crate) fn clear_token_usage(&mut self) {
         self.token_info = None;
         self.bottom_pane.set_token_usage(None);
+    }
+
+    /// Update StatusEngine output for footer display
+    pub(crate) fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
+        self.bottom_pane.set_statusengine_output(output);
     }
 
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {

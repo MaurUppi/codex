@@ -5,6 +5,7 @@ use crate::chatwidget::ChatWidget;
 use crate::file_search::FileSearchManager;
 use crate::pager_overlay::Overlay;
 use crate::resume_picker::ResumeSelection;
+use crate::statusengine::{StatusEngine, StatusEngineConfig, StatusEngineState, StatusItem};
 use crate::tui;
 use crate::tui::TuiEvent;
 use codex_ansi_escape::ansi_escape_line;
@@ -25,9 +26,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
+use tracing;
 // use uuid::Uuid;
 
 pub(crate) struct App {
@@ -54,6 +56,10 @@ pub(crate) struct App {
 
     // Esc-backtracking state grouped
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
+
+    /// StatusEngine for footer status display
+    pub(crate) status_engine: Option<StatusEngine>,
+    session_start_time: Instant,
 }
 
 impl App {
@@ -82,6 +88,7 @@ impl App {
                     initial_prompt: initial_prompt.clone(),
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
+                    statusengine_enabled: config.tui.statusengine.unwrap_or(false),
                 };
                 ChatWidget::new(init, conversation_manager.clone())
             }
@@ -103,6 +110,7 @@ impl App {
                     initial_prompt: initial_prompt.clone(),
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
+                    statusengine_enabled: config.tui.statusengine.unwrap_or(false),
                 };
                 ChatWidget::new_from_existing(
                     init,
@@ -113,6 +121,26 @@ impl App {
         };
 
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+
+        // Initialize StatusEngine if enabled with proper config mapping
+        let status_engine = if config.tui.statusengine.unwrap_or(false) {
+            let status_config = Self::build_statusengine_config(&config.tui);
+            let mut engine = StatusEngine::new(status_config);
+            // Set default Line 2 selection as per requirements
+            engine.set_line2_selection(&[
+                StatusItem::Model,
+                StatusItem::Effort,
+                StatusItem::WorkspaceName,
+                StatusItem::GitBranch,
+                StatusItem::Sandbox,
+                StatusItem::Approval,
+            ]);
+            Some(engine)
+        } else {
+            None
+        };
+
+        let session_start_time = Instant::now();
 
         let mut app = Self {
             server: conversation_manager,
@@ -127,6 +155,8 @@ impl App {
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            status_engine,
+            session_start_time,
         };
 
         let tui_events = tui.event_stream();
@@ -134,12 +164,30 @@ impl App {
 
         tui.frame_requester().schedule_frame();
 
+        // Initialize StatusEngine state after app creation
+        if let Some(status_engine) = &mut app.status_engine {
+            let initial_state = app.build_status_engine_state();
+            status_engine.set_state(initial_state);
+        }
+
         while select! {
             Some(event) = app_event_rx.recv() => {
                 app.handle_event(tui, event).await?
             }
             Some(event) = tui_events.next() => {
                 app.handle_tui_event(tui, event).await?
+            }
+            // StatusEngine tick every 300ms
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                if let Some(status_engine) = &mut app.status_engine {
+                    let now = Instant::now();
+                    let output = status_engine.tick(now).await;
+                    // Pass output to ChatWidget -> BottomPane -> ChatComposer
+                    app.chat_widget.set_statusengine_output(Some(output));
+                    // Output will be rendered in the next frame
+                    tui.frame_requester().schedule_frame();
+                }
+                true
             }
         } {}
         tui.terminal.clear()?;
@@ -198,6 +246,7 @@ impl App {
                     initial_prompt: None,
                     initial_images: Vec::new(),
                     enhanced_keys_supported: self.enhanced_keys_supported,
+                    statusengine_enabled: self.config.tui.statusengine.unwrap_or(false),
                 };
                 self.chat_widget = ChatWidget::new(init, self.server.clone());
                 tui.frame_requester().schedule_frame();
@@ -288,16 +337,36 @@ impl App {
                 self.chat_widget.apply_file_search_result(query, matches);
             }
             AppEvent::UpdateReasoningEffort(effort) => {
-                self.chat_widget.set_reasoning_effort(effort);
+                self.chat_widget.set_reasoning_effort(effort.clone());
+                if let Some(status_engine) = &mut self.status_engine {
+                    let mut state = self.build_status_engine_state();
+                    state.effort = Some(effort.to_string());
+                    status_engine.set_state(state);
+                }
             }
             AppEvent::UpdateModel(model) => {
-                self.chat_widget.set_model(model);
+                self.chat_widget.set_model(model.clone());
+                if let Some(status_engine) = &mut self.status_engine {
+                    let mut state = self.build_status_engine_state();
+                    state.model = Some(model);
+                    status_engine.set_state(state);
+                }
             }
             AppEvent::UpdateAskForApprovalPolicy(policy) => {
-                self.chat_widget.set_approval_policy(policy);
+                self.chat_widget.set_approval_policy(policy.clone());
+                if let Some(status_engine) = &mut self.status_engine {
+                    let mut state = self.build_status_engine_state();
+                    state.approval = Some(policy.to_string());
+                    status_engine.set_state(state);
+                }
             }
             AppEvent::UpdateSandboxPolicy(policy) => {
-                self.chat_widget.set_sandbox_policy(policy);
+                self.chat_widget.set_sandbox_policy(policy.clone());
+                if let Some(status_engine) = &mut self.status_engine {
+                    let mut state = self.build_status_engine_state();
+                    state.sandbox = Some(policy.to_string());
+                    status_engine.set_state(state);
+                }
             }
         }
         Ok(true)
@@ -305,6 +374,55 @@ impl App {
 
     pub(crate) fn token_usage(&self) -> codex_core::protocol::TokenUsage {
         self.chat_widget.token_usage().clone()
+    }
+
+    /// Build StatusEngineConfig from TUI config with validation and clamping
+    fn build_statusengine_config(tui_config: &codex_core::config::Tui) -> StatusEngineConfig {
+        // Apply proper timeout clamping (150-500ms as per assessment)
+        let command_timeout_ms = tui_config.command_timeout_ms.unwrap_or(300).clamp(150, 500);
+
+        // Validate provider with fallback to "builtin"
+        let provider = match tui_config.provider.as_deref() {
+            Some("command") => "command".to_string(),
+            Some("builtin") => "builtin".to_string(),
+            Some(invalid) => {
+                tracing::debug!(
+                    "Invalid TUI provider '{}', falling back to 'builtin'",
+                    invalid
+                );
+                "builtin".to_string()
+            }
+            None => "builtin".to_string(),
+        };
+
+        StatusEngineConfig {
+            command_timeout_ms,
+            command: tui_config.command.clone(),
+            enabled: true,
+            provider,
+        }
+    }
+
+    /// Build current StatusEngineState from app config and state
+    fn build_status_engine_state(&self) -> StatusEngineState {
+        let workspace_name = self
+            .config
+            .cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        StatusEngineState {
+            model: Some(self.config.model.clone()),
+            effort: Some(self.config.model_reasoning_effort.to_string()),
+            workspace_name,
+            git_branch: None, // Will be populated by git helpers in StatusEngine
+            git_counts: None, // Will be populated by git helpers in StatusEngine
+            sandbox: Some(self.config.sandbox_policy.to_string()),
+            approval: Some(self.config.approval_policy.to_string()),
+            since_session_ms: Some(self.session_start_time.elapsed().as_millis() as u64),
+            cwd: Some(self.config.cwd.clone()),
+        }
     }
 
     async fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) {
