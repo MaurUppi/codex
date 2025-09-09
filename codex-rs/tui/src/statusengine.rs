@@ -1,14 +1,14 @@
 //! StatusEngine - Manages TUI footer status display with timing, git info, and external providers.
 
+use ratatui::style::Stylize;
+use serde_json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use serde_json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
-use ratatui::style::Stylize;
 
 /// Configuration for the StatusEngine
 #[derive(Debug, Clone)]
@@ -75,6 +75,8 @@ pub struct StatusEngine {
     last_command_run: Option<Instant>,
     last_line3: Option<String>,
     command_cooldown: Duration,
+    consecutive_failures: u32,
+    backoff_until: Option<Instant>,
 }
 
 impl StatusEngine {
@@ -98,6 +100,8 @@ impl StatusEngine {
             last_command_run: None,
             last_line3: None,
             command_cooldown: Duration::from_millis(300), // Built-in 300ms throttle
+            consecutive_failures: 0,
+            backoff_until: None,
         }
     }
 
@@ -111,6 +115,11 @@ impl StatusEngine {
         self.line2_items = items.to_vec();
     }
 
+    /// Get the current Line 2 items (for testing)
+    pub fn line2_items(&self) -> &[StatusItem] {
+        &self.line2_items
+    }
+
     /// Tick the engine and produce status output
     /// Respects the 300ms throttle for external provider calls
     pub async fn tick(&mut self, now: Instant) -> StatusEngineOutput {
@@ -121,7 +130,8 @@ impl StatusEngine {
     }
 
     /// Build Line 2 from selected status items
-    fn build_line2(&self) -> String {
+    /// Made public for testing purposes
+    pub fn build_line2(&self) -> String {
         let mut parts = Vec::new();
 
         for item in &self.line2_items {
@@ -176,15 +186,29 @@ impl StatusEngine {
     }
 
     /// Check if we should run the command provider and execute if so
-    async fn maybe_run_command_provider(&mut self, now: Instant) -> Option<String> {
+    /// Made public for testing purposes
+    pub async fn maybe_run_command_provider(&mut self, now: Instant) -> Option<String> {
         // Only run if provider is "command" and command is configured
         if self.config.provider != "command" || self.config.command.is_none() {
             return None;
         }
 
-        // Check throttling
+        // Check if we're in backoff period
+        if let Some(backoff_until) = self.backoff_until {
+            if now < backoff_until {
+                return self.last_line3.clone();
+            } else {
+                // Backoff period expired, clear it
+                self.backoff_until = None;
+            }
+        }
+
+        // Check throttling with jitter
+        let jitter_ms = (now.elapsed().as_nanos() % 100) as u64; // Simple jitter 0-99ms
+        let effective_cooldown = self.command_cooldown + Duration::from_millis(jitter_ms);
+
         if let Some(last_run) = self.last_command_run {
-            if now.duration_since(last_run) < self.command_cooldown {
+            if now.duration_since(last_run) < effective_cooldown {
                 return self.last_line3.clone();
             }
         }
@@ -194,15 +218,26 @@ impl StatusEngine {
             Ok(Some(output)) => {
                 self.last_command_run = Some(now);
                 self.last_line3 = Some(output.clone());
+                self.consecutive_failures = 0; // Reset failure count on success
                 Some(output)
             }
             Ok(None) => {
                 self.last_command_run = Some(now);
+                self.consecutive_failures = 0; // Empty result is not a failure
                 // Keep last good output on empty result
                 self.last_line3.clone()
             }
             Err(_) => {
                 self.last_command_run = Some(now);
+                self.consecutive_failures += 1;
+
+                // Apply exponential backoff after failures
+                if self.consecutive_failures >= 3 {
+                    let backoff_ms =
+                        std::cmp::min(5000, 1000 * (1 << (self.consecutive_failures - 3)));
+                    self.backoff_until = Some(now + Duration::from_millis(backoff_ms));
+                }
+
                 // Keep last good output on error
                 self.last_line3.clone()
             }
@@ -210,7 +245,9 @@ impl StatusEngine {
     }
 
     /// Execute the configured command provider
-    async fn run_command_provider(&self) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn run_command_provider(
+        &self,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         let command_path = match &self.config.command {
             Some(cmd) => cmd,
             None => return Ok(None),
@@ -220,16 +257,19 @@ impl StatusEngine {
         let payload = self.build_command_payload()?;
         let payload_json = serde_json::to_string(&payload)?;
 
-        // Spawn the command with timeout
+        // Spawn the command with timeout and proper cleanup
         let timeout_duration = Duration::from_millis(self.config.command_timeout_ms);
-        
-        let result = timeout(timeout_duration, async {
-            let mut child = Command::new(command_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()?;
 
+        let mut child = Command::new(command_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true) // Ensure child is killed if dropped
+            .env_clear() // Clear environment for security
+            .env("PATH", std::env::var("PATH").unwrap_or_default()) // Keep minimal PATH
+            .spawn()?;
+
+        let result = timeout(timeout_duration, async {
             // Write payload to stdin
             if let Some(stdin) = child.stdin.as_mut() {
                 stdin.write_all(payload_json.as_bytes()).await?;
@@ -238,7 +278,7 @@ impl StatusEngine {
 
             // Wait for completion and get output
             let output = child.wait_with_output().await?;
-            
+
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 // Get first line only
@@ -251,12 +291,18 @@ impl StatusEngine {
             } else {
                 Ok(None)
             }
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(e)) => Err(e.into()),
-            Err(_) => Ok(None), // Timeout - return None to keep last good output
+            Err(_) => {
+                // Timeout occurred - kill the child process explicitly
+                let _ = child.kill().await;
+                let _ = child.wait().await; // Reap the process
+                Ok(None) // Return None to keep last good output
+            }
         }
     }
 
@@ -272,47 +318,80 @@ impl StatusEngine {
         }
 
         if let Some(ref effort) = self.state.effort {
-            payload.insert("effort".to_string(), serde_json::Value::String(effort.clone()));
+            payload.insert(
+                "effort".to_string(),
+                serde_json::Value::String(effort.clone()),
+            );
         }
 
         if let Some(ref workspace_name) = self.state.workspace_name {
             let mut workspace_obj = serde_json::Map::new();
-            workspace_obj.insert("name".to_string(), serde_json::Value::String(workspace_name.clone()));
+            workspace_obj.insert(
+                "name".to_string(),
+                serde_json::Value::String(workspace_name.clone()),
+            );
             if let Some(ref cwd) = self.state.cwd {
-                workspace_obj.insert("current_dir".to_string(), serde_json::Value::String(cwd.display().to_string()));
-                workspace_obj.insert("project_dir".to_string(), serde_json::Value::String(cwd.display().to_string()));
+                workspace_obj.insert(
+                    "current_dir".to_string(),
+                    serde_json::Value::String(cwd.display().to_string()),
+                );
+                workspace_obj.insert(
+                    "project_dir".to_string(),
+                    serde_json::Value::String(cwd.display().to_string()),
+                );
             }
-            payload.insert("workspace".to_string(), serde_json::Value::Object(workspace_obj));
+            payload.insert(
+                "workspace".to_string(),
+                serde_json::Value::Object(workspace_obj),
+            );
         }
 
         if let Some(ref cwd) = self.state.cwd {
-            payload.insert("cwd".to_string(), serde_json::Value::String(cwd.display().to_string()));
+            payload.insert(
+                "cwd".to_string(),
+                serde_json::Value::String(cwd.display().to_string()),
+            );
         }
 
         // Git info
         if self.state.git_branch.is_some() || self.state.git_counts.is_some() {
             let mut git_obj = serde_json::Map::new();
             if let Some(ref branch) = self.state.git_branch {
-                git_obj.insert("branch".to_string(), serde_json::Value::String(branch.clone()));
+                git_obj.insert(
+                    "branch".to_string(),
+                    serde_json::Value::String(branch.clone()),
+                );
             }
             if let Some(ref counts) = self.state.git_counts {
-                git_obj.insert("counts".to_string(), serde_json::Value::String(counts.clone()));
+                git_obj.insert(
+                    "counts".to_string(),
+                    serde_json::Value::String(counts.clone()),
+                );
             }
             payload.insert("git".to_string(), serde_json::Value::Object(git_obj));
         }
 
         if let Some(ref sandbox) = self.state.sandbox {
-            payload.insert("sandbox".to_string(), serde_json::Value::String(sandbox.clone()));
+            payload.insert(
+                "sandbox".to_string(),
+                serde_json::Value::String(sandbox.clone()),
+            );
         }
 
         if let Some(ref approval) = self.state.approval {
-            payload.insert("approval".to_string(), serde_json::Value::String(approval.clone()));
+            payload.insert(
+                "approval".to_string(),
+                serde_json::Value::String(approval.clone()),
+            );
         }
 
         // Timing info
         if let Some(since_session_ms) = self.state.since_session_ms {
             let mut timing_obj = serde_json::Map::new();
-            timing_obj.insert("since_session_ms".to_string(), serde_json::Value::Number(since_session_ms.into()));
+            timing_obj.insert(
+                "since_session_ms".to_string(),
+                serde_json::Value::Number(since_session_ms.into()),
+            );
             payload.insert("timing".to_string(), serde_json::Value::Object(timing_obj));
         }
 
@@ -320,7 +399,8 @@ impl StatusEngine {
     }
 
     /// Apply center-ellipsis truncation to a string for the given width
-    fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    /// Made public for testing purposes
+    pub fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
         if text.len() <= max_width {
             return text.to_string();
         }
@@ -336,80 +416,93 @@ impl StatusEngine {
 
         let chars: Vec<char> = text.chars().collect();
         let left_part: String = chars.iter().take(left_len).collect();
-        let right_part: String = chars.iter().rev().take(right_len).collect::<String>().chars().rev().collect();
+        let right_part: String = chars
+            .iter()
+            .rev()
+            .take(right_len)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
 
         format!("{}{}{}", left_part, ellipsis, right_part)
     }
 
-    /// Get width-aware Line 2 with truncation applied
+    /// Get width-aware Line 2 with truncation applied specifically to branch token
     pub fn get_line2_with_width(&self, max_width: usize) -> String {
-        let line2 = self.build_line2();
-        if line2.len() <= max_width {
-            line2
-        } else {
-            // Apply ellipsis to git branch if it's too long
-            // This is a simplified version - in practice you'd want more sophisticated logic
-            Self::truncate_with_ellipsis(&line2, max_width)
+        let mut parts = Vec::new();
+
+        for item in &self.line2_items {
+            match item {
+                StatusItem::Model => {
+                    if let Some(ref model) = self.state.model {
+                        parts.push(model.clone());
+                    }
+                }
+                StatusItem::Effort => {
+                    if let Some(ref effort) = self.state.effort {
+                        parts.push(effort.clone());
+                    }
+                }
+                StatusItem::WorkspaceName => {
+                    if let Some(ref name) = self.state.workspace_name {
+                        parts.push(name.clone());
+                    }
+                }
+                StatusItem::GitBranch => {
+                    if let Some(ref branch) = self.state.git_branch {
+                        let mut git_part = branch.clone();
+                        // Add counts if available
+                        if let Some(ref counts) = self.state.git_counts {
+                            git_part.push_str(&format!(" {}", counts));
+                        }
+
+                        // Calculate available width for branch token
+                        let separator_len = if parts.is_empty() { 0 } else { " | ".len() };
+                        let other_parts_len: usize = parts.iter().map(|p| p.len()).sum::<usize>()
+                            + (parts.len().saturating_sub(1)) * " | ".len(); // separators between existing parts
+                        let remaining_parts_estimate =
+                            (self.line2_items.len() - parts.len() - 1) * 15; // estimate for remaining
+                        let available_for_branch = max_width.saturating_sub(
+                            other_parts_len + separator_len + remaining_parts_estimate,
+                        );
+
+                        if git_part.len() > available_for_branch && available_for_branch > 3 {
+                            git_part =
+                                Self::truncate_with_ellipsis(&git_part, available_for_branch);
+                        }
+                        parts.push(git_part);
+                    }
+                }
+                StatusItem::GitCounts => {
+                    // This is handled in GitBranch to avoid duplication
+                }
+                StatusItem::Sandbox => {
+                    if let Some(ref sandbox) = self.state.sandbox {
+                        parts.push(sandbox.clone());
+                    }
+                }
+                StatusItem::Approval => {
+                    if let Some(ref approval) = self.state.approval {
+                        parts.push(approval.clone());
+                    }
+                }
+            }
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_statusengine_creation() {
-        let config = StatusEngineConfig::default();
-        let engine = StatusEngine::new(config);
-        assert_eq!(engine.line2_items.len(), 7);
-        assert_eq!(engine.line2_items[0], StatusItem::Model);
-    }
-
-    #[test]
-    fn test_line2_building() {
-        let config = StatusEngineConfig::default();
-        let mut engine = StatusEngine::new(config);
-        
-        let mut state = StatusEngineState::default();
-        state.model = Some("gpt-4o-mini".to_string());
-        state.effort = Some("medium".to_string());
-        state.workspace_name = Some("codex".to_string());
-        
-        engine.set_state(state);
-        let line2 = engine.build_line2();
-        
-        assert!(line2.contains("gpt-4o-mini"));
-        assert!(line2.contains("medium"));
-        assert!(line2.contains("codex"));
-    }
-
-    #[test]
-    fn test_truncate_with_ellipsis() {
-        assert_eq!(StatusEngine::truncate_with_ellipsis("short", 10), "short");
-        assert_eq!(StatusEngine::truncate_with_ellipsis("verylongbranchname", 10), "very…name");
-        assert_eq!(StatusEngine::truncate_with_ellipsis("abc", 2), "ab");
-    }
-
-    #[tokio::test]
-    async fn test_command_throttling() {
-        let config = StatusEngineConfig {
-            enabled: true,
-            provider: "command".to_string(),
-            command: Some("/bin/echo".to_string()),
-            command_timeout_ms: 100,
-        };
-        
-        let mut engine = StatusEngine::new(config);
-        let now = Instant::now();
-        
-        // First call should work
-        let output1 = engine.maybe_run_command_provider(now).await;
-        
-        // Immediate second call should return cached result (throttled)
-        let output2 = engine.maybe_run_command_provider(now).await;
-        
-        // Should get same result due to throttling
-        assert_eq!(output1, output2);
+        // Join with " | " separator and apply dim styling
+        if parts.is_empty() {
+            String::new()
+        } else {
+            let result = parts.join(" | ");
+            // If still too long after branch truncation, truncate the whole line as fallback
+            if result.len() > max_width {
+                Self::truncate_with_ellipsis(&result, max_width)
+                    .dim()
+                    .to_string()
+            } else {
+                result.dim().to_string()
+            }
+        }
     }
 }
