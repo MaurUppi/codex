@@ -1,8 +1,0 @@
-[2m2025-09-07T11:16:25.203883Z[0m [32m INFO[0m [2mcodex_core::config[0m[2m:[0m cwd not set, using current dir
-[2m2025-09-07T11:16:25.254487Z[0m [32m INFO[0m [2mcodex_mcp_client::mcp_client[0m[2m:[0m <- notification: {"jsonrpc":"2.0","method":"initialized"}
-[2m2025-09-07T11:16:26.940624Z[0m [32m INFO[0m [2mcodex_core::mcp_connection_manager[0m[2m:[0m aggregated 26 tools from 4 servers
-[2m2025-09-07T11:16:26.943293Z[0m [32m INFO[0m [2mcodex_cli::proto[0m[2m:[0m Submission queue closed
-[2m2025-09-07T11:16:26.946088Z[0m [32m INFO[0m [2mcodex_core::codex[0m[2m:[0m Shutting down Codex instance
-[2m2025-09-07T11:16:42.020127Z[0m [32m INFO[0m [2mcodex_core::codex[0m[2m:[0m interrupt received: abort current task, if any
-[2m2025-09-07T11:16:42.020365Z[0m [31mERROR[0m [2mcodex_cli::proto[0m[2m:[0m internal error; agent loop died unexpectedly
-[2m2025-09-07T11:16:42.020468Z[0m [32m INFO[0m [2mcodex_cli::proto[0m[2m:[0m Event queue closed
