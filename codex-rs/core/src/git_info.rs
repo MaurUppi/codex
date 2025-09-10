@@ -540,13 +540,12 @@ pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
                 let mut untracked_lines = 0u64;
                 for file_path in &untracked_files {
                     let file_full_path = cwd.join(file_path);
-                    if let Ok(metadata) = std::fs::metadata(&file_full_path) {
-                        if metadata.is_file() {
+                    if let Ok(metadata) = std::fs::metadata(&file_full_path)
+                        && metadata.is_file() {
                             // Use byte size as a rough proxy for line count
                             // Assume ~50 chars per line average (reasonable for code)
                             untracked_lines += (metadata.len() / 50).max(1);
                         }
-                    }
                 }
                 added += untracked_lines;
             } else if untracked_files.len() > 50 {
