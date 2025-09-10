@@ -897,7 +897,6 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.1.14",
  "url",
- "uuid",
  "vt100",
 ]
 

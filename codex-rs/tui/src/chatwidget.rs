@@ -923,6 +923,11 @@ impl ChatWidget {
         self.bottom_pane.handle_paste(text);
     }
 
+    /// Returns the current conversation/session id as a String if available.
+    pub(crate) fn conversation_id_str(&self) -> Option<String> {
+        self.conversation_id.as_ref().map(|id| id.to_string())
+    }
+
     // Returns true if caller should skip rendering this frame (a future frame is scheduled).
     pub(crate) fn handle_paste_burst_tick(&mut self, frame_requester: FrameRequester) -> bool {
         if self.bottom_pane.flush_paste_burst_if_due() {

@@ -34,7 +34,6 @@ use std::time::Instant;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 use tracing;
-use uuid::Uuid;
 
 pub(crate) struct App {
     pub(crate) server: Arc<ConversationManager>,
@@ -64,7 +63,6 @@ pub(crate) struct App {
     /// StatusEngine for footer status display
     pub(crate) status_engine: Option<StatusEngine>,
     session_start_time: Instant,
-    session_id: String,
 }
 
 impl App {
@@ -146,7 +144,6 @@ impl App {
         };
 
         let session_start_time = Instant::now();
-        let session_id = Uuid::new_v4().to_string();
 
         let mut app = Self {
             server: conversation_manager,
@@ -163,7 +160,6 @@ impl App {
             backtrack: BacktrackState::default(),
             status_engine,
             session_start_time,
-            session_id,
         };
 
         let tui_events = tui.event_stream();
@@ -434,7 +430,7 @@ impl App {
             .map(|s| s.to_string());
 
         StatusEngineState {
-            session_id: Some(self.session_id.clone()),
+            session_id: self.chat_widget.conversation_id_str(),
             model: Some(self.config.model.clone()),
             effort: Some(self.config.model_reasoning_effort.to_string()),
             workspace_name,
