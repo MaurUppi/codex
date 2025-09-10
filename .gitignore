@@ -84,3 +84,6 @@ CHANGELOG.ignore.md
 project/
 .serena/
 .idea/
+# StatusEngine debug artifacts
+.statusengine-debug/
+**/.statusengine-debug/
