@@ -168,6 +168,9 @@ impl StatusEngine {
             // Get diff counts (+added, -removed) against HEAD
             if let Some((added, removed)) = working_diff_counts(cwd).await {
                 self.state.git_counts = Some(format!("+{added} -{removed}"));
+            } else if self.state.git_branch.is_some() {
+                // Repo is present (branch known) and no changes detected → mark clean
+                self.state.git_counts = Some("✓".to_string());
             }
         }
     }
