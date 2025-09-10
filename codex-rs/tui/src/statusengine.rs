@@ -2,7 +2,6 @@
 
 use ratatui::style::Stylize;
 use serde_json;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -11,6 +10,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing;
+
+// Import git helpers for branch and diff count information
+use codex_core::git_info::{collect_git_info, working_diff_counts};
 
 /// Configuration for the StatusEngine
 #[derive(Debug, Clone)]
@@ -142,10 +144,29 @@ impl StatusEngine {
     /// Tick the engine and produce status output
     /// Respects the 300ms throttle for external provider calls
     pub async fn tick(&mut self, now: Instant) -> StatusEngineOutput {
+        // Update git information before building Line 2
+        self.update_git_info().await;
+        
         let line2 = self.build_line2();
         let line3 = self.maybe_run_command_provider(now).await;
 
         StatusEngineOutput { line2, line3 }
+    }
+
+    /// Update git branch and diff counts information
+    /// This is called on each tick to refresh git status
+    async fn update_git_info(&mut self) {
+        if let Some(ref cwd) = self.state.cwd {
+            // Get current git branch from git info
+            if let Some(git_info) = collect_git_info(cwd).await {
+                self.state.git_branch = git_info.branch;
+            }
+            
+            // Get diff counts (+added, -removed) against HEAD
+            if let Some((added, removed)) = working_diff_counts(cwd).await {
+                self.state.git_counts = Some(format!("+{} -{}", added, removed));
+            }
+        }
     }
 
     /// Build Line 2 from selected status items
@@ -229,11 +250,11 @@ impl StatusEngine {
         let jitter_ms = (now.elapsed().as_nanos() % 100) as u64; // Simple jitter 0-99ms
         let effective_cooldown = self.command_cooldown + Duration::from_millis(jitter_ms);
 
-        if let Some(last_run) = self.last_command_run {
-            if now.duration_since(last_run) < effective_cooldown {
-                tracing::debug!("StatusEngine command provider throttled, using cached result");
-                return self.last_line3.clone();
-            }
+        if let Some(last_run) = self.last_command_run
+            && now.duration_since(last_run) < effective_cooldown
+        {
+            tracing::debug!("StatusEngine command provider throttled, using cached result");
+            return self.last_line3.clone();
         }
 
         // Run the command
@@ -331,7 +352,7 @@ impl StatusEngine {
 
         match result {
             Ok(Ok(output)) => Ok(output),
-            Ok(Err(e)) => Err(e.into()),
+            Ok(Err(e)) => Err(e),
             Err(_) => {
                 // Timeout occurred - child process should be killed by kill_on_drop(true)
                 tracing::debug!(

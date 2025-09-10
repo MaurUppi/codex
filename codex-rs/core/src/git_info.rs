@@ -513,8 +513,7 @@ pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
     let mut added = 0u64;
     let mut removed = 0u64;
 
-    if let Some(output) = diff_result {
-        if output.status.success() {
+    if let Some(output) = diff_result && output.status.success() {
             let diff_output = String::from_utf8_lossy(&output.stdout);
             for line in diff_output.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -526,15 +525,13 @@ pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
                     }
                 }
             }
-        }
     }
 
     // Also check for untracked files and estimate their contribution more accurately
     let untracked_result =
         run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await;
 
-    if let Some(output) = untracked_result {
-        if output.status.success() {
+    if let Some(output) = untracked_result && output.status.success() {
             let untracked_output = String::from_utf8_lossy(&output.stdout);
             let untracked_files: Vec<&str> = untracked_output.lines().collect();
 
@@ -558,7 +555,6 @@ pub async fn working_diff_counts(cwd: &Path) -> Option<(u64, u64)> {
                 let untracked_count = untracked_files.len() as u64;
                 added += untracked_count * 5; // More conservative estimate: 5 lines per file
             }
-        }
     }
 
     // Return counts only if we have any changes

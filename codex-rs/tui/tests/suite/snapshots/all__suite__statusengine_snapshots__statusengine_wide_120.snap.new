@@ -1,6 +1,0 @@
----
-source: tui/tests/suite/statusengine_snapshots.rs
-assertion_line: 140
-expression: result
----
-▌                                                                                                                       ▌                                                                                                                        ⏎ send   ⇧⏎ newline   ⌃T transcript   ⌃C quit

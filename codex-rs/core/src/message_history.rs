@@ -16,8 +16,6 @@
 
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::io::Result;
 use std::io::Write;
 use std::path::PathBuf;
@@ -109,7 +107,7 @@ pub(crate) async fn append_entry(
         options.mode(0o600);
     }
 
-    let mut history_file = options.open(&path)?;
+    let history_file = options.open(&path)?;
 
     // Ensure permissions.
     ensure_owner_only_permissions(&history_file).await?;
@@ -129,7 +127,7 @@ pub(crate) async fn append_entry(
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(RETRY_SLEEP);
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
 
@@ -220,7 +218,7 @@ pub(crate) fn lookup(log_id: u64, offset: usize, config: &Config) -> Option<Hist
 
     // Open & lock file for reading using a shared lock.
     // Retry a few times to avoid indefinite blocking.
-    let mut lock = RwLock::new(file);
+    let lock = RwLock::new(file);
     for _ in 0..MAX_RETRIES {
         match lock.try_read() {
             Ok(guard) => {
