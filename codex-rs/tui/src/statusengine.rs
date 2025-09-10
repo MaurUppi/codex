@@ -5,7 +5,8 @@ use serde_json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -171,11 +172,11 @@ impl StatusEngine {
                 }
                 StatusItem::GitBranch => {
                     if let Some(ref branch) = self.state.git_branch {
-                        let mut git_part = branch.clone();
-                        // Add counts if available
-                        if let Some(ref counts) = self.state.git_counts {
-                            git_part.push_str(&format!(" {}", counts));
-                        }
+                        let git_part = if let Some(ref counts) = self.state.git_counts {
+                            format!("{branch} {counts}")
+                        } else {
+                            branch.clone()
+                        };
                         parts.push(git_part);
                     }
                 }
@@ -333,7 +334,9 @@ impl StatusEngine {
             Ok(Err(e)) => Err(e.into()),
             Err(_) => {
                 // Timeout occurred - child process should be killed by kill_on_drop(true)
-                tracing::debug!("StatusEngine command provider timed out, child will be killed on drop");
+                tracing::debug!(
+                    "StatusEngine command provider timed out, child will be killed on drop"
+                );
                 Ok(None) // Return None to keep last good output
             }
         }
@@ -457,7 +460,7 @@ impl StatusEngine {
             .rev()
             .collect();
 
-        format!("{}{}{}", left_part, ellipsis, right_part)
+        format!("{left_part}{ellipsis}{right_part}")
     }
 
     /// Get width-aware Line 2 with truncation applied specifically to branch token
@@ -483,11 +486,11 @@ impl StatusEngine {
                 }
                 StatusItem::GitBranch => {
                     if let Some(ref branch) = self.state.git_branch {
-                        let mut git_part = branch.clone();
-                        // Add counts if available
-                        if let Some(ref counts) = self.state.git_counts {
-                            git_part.push_str(&format!(" {}", counts));
-                        }
+                        let mut git_part = if let Some(ref counts) = self.state.git_counts {
+                            format!("{branch} {counts}")
+                        } else {
+                            branch.clone()
+                        };
 
                         // Calculate available width for branch token
                         let separator_len = if parts.is_empty() { 0 } else { " | ".len() };

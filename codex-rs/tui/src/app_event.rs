@@ -10,7 +10,7 @@ use codex_core::protocol_config_types::ReasoningEffort;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
-pub(crate) enum AppEvent {
+pub enum AppEvent {
     CodexEvent(Event),
 
     /// Start a new session.

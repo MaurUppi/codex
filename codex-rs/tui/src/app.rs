@@ -5,7 +5,10 @@ use crate::chatwidget::ChatWidget;
 use crate::file_search::FileSearchManager;
 use crate::pager_overlay::Overlay;
 use crate::resume_picker::ResumeSelection;
-use crate::statusengine::{StatusEngine, StatusEngineConfig, StatusEngineState, StatusItem};
+use crate::statusengine::StatusEngine;
+use crate::statusengine::StatusEngineConfig;
+use crate::statusengine::StatusEngineState;
+use crate::statusengine::StatusItem;
 use crate::tui;
 use crate::tui::TuiEvent;
 use codex_ansi_escape::ansi_escape_line;
@@ -26,7 +29,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 use tracing;
@@ -165,9 +169,11 @@ impl App {
         tui.frame_requester().schedule_frame();
 
         // Initialize StatusEngine state after app creation
-        if let Some(status_engine) = &mut app.status_engine {
+        if app.status_engine.is_some() {
             let initial_state = app.build_status_engine_state();
-            status_engine.set_state(initial_state);
+            if let Some(status_engine) = &mut app.status_engine {
+                status_engine.set_state(initial_state);
+            }
         }
 
         while select! {
@@ -338,34 +344,42 @@ impl App {
             }
             AppEvent::UpdateReasoningEffort(effort) => {
                 self.chat_widget.set_reasoning_effort(effort.clone());
-                if let Some(status_engine) = &mut self.status_engine {
+                if self.status_engine.is_some() {
                     let mut state = self.build_status_engine_state();
                     state.effort = Some(effort.to_string());
-                    status_engine.set_state(state);
+                    if let Some(status_engine) = &mut self.status_engine {
+                        status_engine.set_state(state);
+                    }
                 }
             }
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(model.clone());
-                if let Some(status_engine) = &mut self.status_engine {
+                if self.status_engine.is_some() {
                     let mut state = self.build_status_engine_state();
                     state.model = Some(model);
-                    status_engine.set_state(state);
+                    if let Some(status_engine) = &mut self.status_engine {
+                        status_engine.set_state(state);
+                    }
                 }
             }
             AppEvent::UpdateAskForApprovalPolicy(policy) => {
                 self.chat_widget.set_approval_policy(policy.clone());
-                if let Some(status_engine) = &mut self.status_engine {
+                if self.status_engine.is_some() {
                     let mut state = self.build_status_engine_state();
                     state.approval = Some(policy.to_string());
-                    status_engine.set_state(state);
+                    if let Some(status_engine) = &mut self.status_engine {
+                        status_engine.set_state(state);
+                    }
                 }
             }
             AppEvent::UpdateSandboxPolicy(policy) => {
                 self.chat_widget.set_sandbox_policy(policy.clone());
-                if let Some(status_engine) = &mut self.status_engine {
+                if self.status_engine.is_some() {
                     let mut state = self.build_status_engine_state();
                     state.sandbox = Some(policy.to_string());
-                    status_engine.set_state(state);
+                    if let Some(status_engine) = &mut self.status_engine {
+                        status_engine.set_state(state);
+                    }
                 }
             }
         }
@@ -377,7 +391,7 @@ impl App {
     }
 
     /// Build StatusEngineConfig from TUI config with validation and clamping
-    fn build_statusengine_config(tui_config: &codex_core::config::Tui) -> StatusEngineConfig {
+    fn build_statusengine_config(tui_config: &codex_core::config_types::Tui) -> StatusEngineConfig {
         // Apply proper timeout clamping (150-500ms as per assessment)
         let command_timeout_ms = tui_config.command_timeout_ms.unwrap_or(300).clamp(150, 500);
 

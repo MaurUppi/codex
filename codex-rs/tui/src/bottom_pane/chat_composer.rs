@@ -65,7 +65,7 @@ struct AttachedImage {
     path: PathBuf,
 }
 
-pub(crate) struct ChatComposer {
+pub struct ChatComposer {
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
     active_popup: ActivePopup,
@@ -106,6 +106,7 @@ impl ChatComposer {
         enhanced_keys_supported: bool,
         placeholder_text: String,
         disable_paste_burst: bool,
+        statusengine_enabled: bool,
     ) -> Self {
         Self::new_with_statusengine(
             has_input_focus,
@@ -113,7 +114,7 @@ impl ChatComposer {
             enhanced_keys_supported,
             placeholder_text,
             disable_paste_burst,
-            false,
+            statusengine_enabled,
         )
     }
 
@@ -1247,7 +1248,7 @@ impl ChatComposer {
     }
 
     /// Update StatusEngine output for footer display
-    pub(crate) fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
+    pub fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
         self.statusengine_output = output;
     }
 
@@ -1293,7 +1294,7 @@ impl WidgetRef for ChatComposer {
             ActivePopup::None => {
                 // Split the footer area for Line 1 (hints) and StatusEngine Lines 2/3
                 let (line1_rect, statusengine_rect) = if self.statusengine_enabled {
-                    let rects = Layout::vertical([
+                    let rects: [Rect; 2] = Layout::vertical([
                         Constraint::Length(1), // Line 1 (hints)
                         Constraint::Length(2), // Lines 2+3 (StatusEngine)
                     ])
@@ -1724,6 +1725,7 @@ mod tests {
                 sender.clone(),
                 false,
                 "Ask Codex to do anything".to_string(),
+                false,
                 false,
             );
 

@@ -3,21 +3,17 @@
 //! This module tests footer rendering with StatusEngine output at different widths,
 //! ensuring the layout behaves correctly and text truncation works as expected.
 
-use codex_tui::app_event::AppEvent;
 use codex_tui::app_event_sender::AppEventSender;
 use codex_tui::bottom_pane::chat_composer::ChatComposer;
-use codex_tui::statusengine::{
-    StatusEngine, StatusEngineConfig, StatusEngineOutput, StatusEngineState, StatusItem,
-};
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
-    style::Style,
-    text::Line,
-};
-use std::cell::RefCell;
+use codex_tui::statusengine::StatusEngine;
+use codex_tui::statusengine::StatusEngineConfig;
+use codex_tui::statusengine::StatusEngineOutput;
+use codex_tui::statusengine::StatusEngineState;
+use codex_tui::statusengine::StatusItem;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
+use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc;
 
 /// Test helper to create a ChatComposer with StatusEngine enabled
@@ -56,22 +52,23 @@ fn render_statusengine_footer(
 ) -> String {
     let composer = create_test_chat_composer(output);
     let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let mut terminal = Terminal::new(backend)
+        .expect("Failed to create test terminal for StatusEngine rendering");
 
     terminal
         .draw(|f| {
             let area = Rect::new(0, 0, width, height);
             composer.render_ref(area, f.buffer_mut());
         })
-        .unwrap();
+        .expect("Failed to draw StatusEngine footer to test terminal");
 
     terminal
         .backend()
         .buffer()
         .clone()
         .content()
-        .to_vec()
-        .into_iter()
+        .iter()
+        .map(|cell| cell.symbol())
         .collect::<String>()
 }
 
@@ -180,9 +177,10 @@ fn test_statusengine_truncation_behavior() {
 async fn test_statusengine_chatcomposer_integration() {
     // Create a StatusEngine with realistic configuration
     let config = StatusEngineConfig {
-        provider: Some("builtin".to_string()),
+        provider: "builtin".to_string(),
         command: None,
-        command_timeout_ms: Some(300),
+        command_timeout_ms: 300,
+        enabled: false,
     };
 
     let mut engine = StatusEngine::new(config);
@@ -197,11 +195,11 @@ async fn test_statusengine_chatcomposer_integration() {
 
     // Set realistic state
     let mut state = StatusEngineState::default();
-    state.model = Some("claude-3-5-sonnet".to_string());
+    state.model = Some("gpt-5".to_string());
     state.effort = Some("auto".to_string());
     state.workspace_name = Some("codex".to_string());
     state.git_branch = Some("feat/statusengine".to_string());
-    state.git_counts = Some((5, 2, 1)); // staged, unstaged, untracked
+    state.git_counts = Some("+5 -2 ?1".to_string()); // staged, unstaged, untracked
     state.sandbox = Some("read-only".to_string());
     state.approval = Some("on-request".to_string());
 

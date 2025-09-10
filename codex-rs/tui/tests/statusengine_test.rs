@@ -1,4 +1,7 @@
-use codex_tui::statusengine::{StatusEngine, StatusEngineConfig, StatusEngineState, StatusItem};
+use codex_tui::statusengine::StatusEngine;
+use codex_tui::statusengine::StatusEngineConfig;
+use codex_tui::statusengine::StatusEngineState;
+use codex_tui::statusengine::StatusItem;
 use std::time::Instant;
 
 #[test]
