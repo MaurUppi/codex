@@ -628,6 +628,7 @@ dependencies = [
  "dirs",
  "env-flags",
  "eventsource-stream",
+ "fd-lock",
  "futures",
  "landlock",
  "libc",

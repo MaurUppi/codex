@@ -281,6 +281,7 @@ mod tests {
                 history_entry_count: 1000,
                 initial_messages: None,
             }),
+            since_session_ms: None,
         };
 
         outgoing_message_sender
@@ -315,6 +316,7 @@ mod tests {
         let event = Event {
             id: "1".to_string(),
             msg: EventMsg::SessionConfigured(session_configured_event.clone()),
+            since_session_ms: None,
         };
         let meta = OutgoingNotificationMeta {
             request_id: Some(RequestId::String("123".to_string())),

@@ -303,7 +303,7 @@ impl StatusEngine {
             .env("PATH", std::env::var("PATH").unwrap_or_default()) // Keep minimal PATH
             .spawn()?;
 
-        let result = timeout(timeout_duration, async {
+        let result = timeout(timeout_duration, async move {
             // Write payload to stdin
             if let Some(stdin) = child.stdin.as_mut() {
                 stdin.write_all(payload_json.as_bytes()).await?;
@@ -318,7 +318,7 @@ impl StatusEngine {
                 // Get first line only
                 let first_line = stdout.lines().next().unwrap_or("").trim().to_string();
                 if first_line.is_empty() {
-                    Ok(None)
+                    Ok::<Option<String>, Box<dyn std::error::Error + Send + Sync>>(None)
                 } else {
                     Ok(Some(first_line))
                 }
@@ -332,10 +332,8 @@ impl StatusEngine {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(e)) => Err(e.into()),
             Err(_) => {
-                // Timeout occurred - kill the child process explicitly
-                tracing::debug!("StatusEngine command provider timed out, killing child process");
-                let _ = child.kill().await;
-                let _ = child.wait().await; // Reap the process
+                // Timeout occurred - child process should be killed by kill_on_drop(true)
+                tracing::debug!("StatusEngine command provider timed out, child will be killed on drop");
                 Ok(None) // Return None to keep last good output
             }
         }

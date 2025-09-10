@@ -635,6 +635,7 @@ impl CodexMessageProcessor {
                 let event = Event {
                     id: "".to_string(),
                     msg: EventMsg::SessionConfigured(session_configured.clone()),
+                    since_session_ms: None,
                 };
                 self.outgoing.send_event_as_notification(&event, None).await;
                 let initial_messages = session_configured.initial_messages.map(|msgs| {
@@ -920,7 +921,7 @@ async fn apply_bespoke_event_handling(
     outgoing: Arc<OutgoingMessageSender>,
     pending_interrupts: Arc<Mutex<HashMap<ConversationId, Vec<RequestId>>>>,
 ) {
-    let Event { id: event_id, msg } = event;
+    let Event { id: event_id, msg, .. } = event;
     match msg {
         EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
             call_id,

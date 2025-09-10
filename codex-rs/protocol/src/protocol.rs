@@ -1040,6 +1040,7 @@ mod tests {
                 history_entry_count: 0,
                 initial_messages: None,
             }),
+            since_session_ms: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         assert_eq!(

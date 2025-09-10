@@ -580,6 +580,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
 
         // Start a running task so the status indicator is active above the composer.
