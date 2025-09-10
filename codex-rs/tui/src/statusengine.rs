@@ -52,6 +52,7 @@ pub enum StatusItem {
 /// Current state of the session for status display
 #[derive(Debug, Clone, Default)]
 pub struct StatusEngineState {
+    pub session_id: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub workspace_name: Option<String>,
@@ -330,7 +331,12 @@ impl StatusEngine {
             self.config.command_timeout_ms
         );
 
-        let mut child = Command::new(command_path)
+        // Build command and set working directory to the configured workspace cwd when available
+        let mut cmd = Command::new(command_path);
+        if let Some(ref cwd) = self.state.cwd {
+            cmd.current_dir(cwd);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -382,6 +388,13 @@ impl StatusEngine {
         let mut payload = serde_json::Map::new();
 
         // Add available fields
+        if let Some(ref session_id) = self.state.session_id {
+            payload.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.clone()),
+            );
+        }
+
         if let Some(ref model) = self.state.model {
             let mut model_obj = serde_json::Map::new();
             model_obj.insert("id".to_string(), serde_json::Value::String(model.clone()));

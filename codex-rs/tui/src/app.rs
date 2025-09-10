@@ -34,7 +34,7 @@ use std::time::Instant;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 use tracing;
-// use uuid::Uuid;
+use uuid::Uuid;
 
 pub(crate) struct App {
     pub(crate) server: Arc<ConversationManager>,
@@ -64,6 +64,7 @@ pub(crate) struct App {
     /// StatusEngine for footer status display
     pub(crate) status_engine: Option<StatusEngine>,
     session_start_time: Instant,
+    session_id: String,
 }
 
 impl App {
@@ -145,6 +146,7 @@ impl App {
         };
 
         let session_start_time = Instant::now();
+        let session_id = Uuid::new_v4().to_string();
 
         let mut app = Self {
             server: conversation_manager,
@@ -161,6 +163,7 @@ impl App {
             backtrack: BacktrackState::default(),
             status_engine,
             session_start_time,
+            session_id,
         };
 
         let tui_events = tui.event_stream();
@@ -185,7 +188,11 @@ impl App {
             }
             // StatusEngine tick every 300ms
             _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                // Refresh dynamic state (e.g., since_session_ms) before each tick
+                let updated_state = app.build_status_engine_state();
                 if let Some(status_engine) = &mut app.status_engine {
+                    status_engine.set_state(updated_state);
+
                     let now = Instant::now();
                     let output = status_engine.tick(now).await;
                     // Pass output to ChatWidget -> BottomPane -> ChatComposer
@@ -427,6 +434,7 @@ impl App {
             .map(|s| s.to_string());
 
         StatusEngineState {
+            session_id: Some(self.session_id.clone()),
             model: Some(self.config.model.clone()),
             effort: Some(self.config.model_reasoning_effort.to_string()),
             workspace_name,
