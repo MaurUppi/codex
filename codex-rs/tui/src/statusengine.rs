@@ -1,6 +1,6 @@
 //! StatusEngine - Manages TUI footer status display with timing, git info, and external providers.
 
-use ratatui::style::Stylize;
+use ratatui::style::{Color, Stylize};
 use serde_json;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -85,8 +85,6 @@ pub struct StatusEngine {
 impl StatusEngine {
     /// Create a new StatusEngine with the given configuration
     pub fn new(mut config: StatusEngineConfig) -> Self {
-        // Validate and clamp configuration values
-
         // Clamp command timeout to reasonable range (150-500ms as per assessment)
         config.command_timeout_ms = config.command_timeout_ms.clamp(150, 500);
 
@@ -138,6 +136,7 @@ impl StatusEngine {
 
     /// Apply consistent styling to status line text
     fn style_status_line(text: String) -> String {
+        // Apply subtle dimming to make the status line less visually prominent
         text.dim().to_string()
     }
 
@@ -187,17 +186,17 @@ impl StatusEngine {
             match item {
                 StatusItem::Model => {
                     if let Some(ref model) = self.state.model {
-                        parts.push(model.clone());
+                        parts.push(model.clone().cyan().to_string());
                     }
                 }
                 StatusItem::Effort => {
                     if let Some(ref effort) = self.state.effort {
-                        parts.push(effort.clone());
+                        parts.push(effort.clone().fg(Color::Yellow).to_string());
                     }
                 }
                 StatusItem::WorkspaceName => {
                     if let Some(ref name) = self.state.workspace_name {
-                        parts.push(name.clone());
+                        parts.push(name.clone().blue().to_string());
                     }
                 }
                 StatusItem::GitBranch => {
@@ -207,17 +206,17 @@ impl StatusEngine {
                         } else {
                             branch.clone()
                         };
-                        parts.push(git_part);
+                        parts.push(git_part.magenta().to_string());
                     }
                 }
                 StatusItem::Sandbox => {
                     if let Some(ref sandbox) = self.state.sandbox {
-                        parts.push(sandbox.clone());
+                        parts.push(sandbox.clone().green().to_string());
                     }
                 }
                 StatusItem::Approval => {
                     if let Some(ref approval) = self.state.approval {
-                        parts.push(approval.clone());
+                        parts.push(approval.clone().red().to_string());
                     }
                 }
             }
@@ -504,17 +503,17 @@ impl StatusEngine {
             match item {
                 StatusItem::Model => {
                     if let Some(ref model) = self.state.model {
-                        parts.push(model.clone());
+                        parts.push(model.clone().cyan().to_string());
                     }
                 }
                 StatusItem::Effort => {
                     if let Some(ref effort) = self.state.effort {
-                        parts.push(effort.clone());
+                        parts.push(effort.clone().fg(Color::Yellow).to_string());
                     }
                 }
                 StatusItem::WorkspaceName => {
                     if let Some(ref name) = self.state.workspace_name {
-                        parts.push(name.clone());
+                        parts.push(name.clone().blue().to_string());
                     }
                 }
                 StatusItem::GitBranch => {
@@ -539,17 +538,17 @@ impl StatusEngine {
                             git_part =
                                 Self::truncate_with_ellipsis(&git_part, available_for_branch);
                         }
-                        parts.push(git_part);
+                        parts.push(git_part.magenta().to_string());
                     }
                 }
                 StatusItem::Sandbox => {
                     if let Some(ref sandbox) = self.state.sandbox {
-                        parts.push(sandbox.clone());
+                        parts.push(sandbox.clone().green().to_string());
                     }
                 }
                 StatusItem::Approval => {
                     if let Some(ref approval) = self.state.approval {
-                        parts.push(approval.clone());
+                        parts.push(approval.clone().red().to_string());
                     }
                 }
             }

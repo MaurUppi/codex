@@ -175,7 +175,8 @@ impl ChatComposer {
         let popup_height = match &self.active_popup {
             ActivePopup::Command(popup) => popup.calculate_required_height(),
             ActivePopup::File(popup) => popup.calculate_required_height(),
-            ActivePopup::None => 1,
+            // Reserve space for footer: Line 1 (hints) + Lines 2/3 (StatusEngine) when enabled.
+            ActivePopup::None => if self.statusengine_enabled { 3 } else { 1 },
         };
         let [textarea_rect, _] =
             Layout::vertical([Constraint::Min(1), Constraint::Max(popup_height)]).areas(area);
@@ -1258,19 +1259,80 @@ impl ChatComposer {
             let [line2_rect, line3_rect] =
                 Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
-            if let Some(ref output) = self.statusengine_output {
-                // Render Line 2
-                Line::from(output.line2.clone())
-                    .style(Style::default().dim())
-                    .render_ref(line2_rect, buf);
+                if let Some(ref output) = self.statusengine_output {
+                    // Render Line 2 with colorized spans (no emoji)
+                    let make_line2_spans = |text: &str| -> Vec<Span<'static>> {
+                        let mut spans: Vec<Span<'static>> = Vec::new();
+                        let parts: Vec<&str> = text.split(" | ").collect();
+                        for (i, part) in parts.iter().enumerate() {
+                            if i > 0 {
+                                spans.push(Span::raw(" | "));
+                            }
+                            match i {
+                                // Model
+                                0 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Cyan),
+                                )),
+                                // Effort
+                                1 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Blue),
+                                )),
+                                // Workspace
+                                2 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Yellow),
+                                )),
+                                // Git branch (+/-/?) counts possibly included in same segment
+                                3 => {
+                                    let mut first = true;
+                                    for tok in part.split_whitespace() {
+                                        if !first {
+                                            spans.push(Span::raw(" "));
+                                        }
+                                        first = false;
+                                        let style = if tok.starts_with('+') {
+                                            Style::default().fg(Color::Green)
+                                        } else if tok.starts_with('-') {
+                                            Style::default().fg(Color::Red)
+                                        } else if tok.starts_with('?') {
+                                            Style::default().fg(Color::Yellow)
+                                        } else {
+                                            Style::default().fg(Color::Green)
+                                        };
+                                        spans.push(Span::styled(tok.to_string(), style));
+                                    }
+                                }
+                                // Sandbox
+                                4 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Magenta),
+                                )),
+                                // Approval
+                                5 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Yellow),
+                                )),
+                                // Any extra items: render dim default
+                                _ => spans.push(Span::raw((*part).to_string())),
+                            }
+                        }
+                        spans
+                    };
 
-                // Render Line 3 (optional)
-                if let Some(ref line3) = output.line3 {
-                    Line::from(line3.clone())
+                    let line2_spans = make_line2_spans(&output.line2);
+                    Line::from(line2_spans)
                         .style(Style::default().dim())
-                        .render_ref(line3_rect, buf);
+                        .render_ref(line2_rect, buf);
+
+                    // Render Line 3 (optional)
+                    if let Some(ref line3) = output.line3 {
+                        Line::from(line3.clone())
+                            .style(Style::default().dim())
+                            .render_ref(line3_rect, buf);
+                    }
                 }
-            }
         }
     }
 }
@@ -1280,7 +1342,8 @@ impl WidgetRef for ChatComposer {
         let popup_height = match &self.active_popup {
             ActivePopup::Command(popup) => popup.calculate_required_height(),
             ActivePopup::File(popup) => popup.calculate_required_height(),
-            ActivePopup::None => 1,
+            // Reserve space for footer: Line 1 (hints) + Lines 2/3 (StatusEngine) when enabled.
+            ActivePopup::None => if self.statusengine_enabled { 3 } else { 1 },
         };
         let [textarea_rect, popup_rect] =
             Layout::vertical([Constraint::Min(1), Constraint::Max(popup_height)]).areas(area);
