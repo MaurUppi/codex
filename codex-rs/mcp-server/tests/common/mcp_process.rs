@@ -13,7 +13,6 @@ use anyhow::Context;
 use assert_cmd::prelude::*;
 use codex_mcp_server::CodexToolCallParam;
 use codex_protocol::mcp_protocol::AddConversationListenerParams;
-use codex_protocol::mcp_protocol::ArchiveConversationParams;
 use codex_protocol::mcp_protocol::CancelLoginChatGptParams;
 use codex_protocol::mcp_protocol::GetAuthStatusParams;
 use codex_protocol::mcp_protocol::InterruptConversationParams;
@@ -26,13 +25,13 @@ use codex_protocol::mcp_protocol::SendUserTurnParams;
 
 use mcp_types::CallToolRequestParams;
 use mcp_types::ClientCapabilities;
+use mcp_types::Implementation;
 use mcp_types::InitializeRequestParams;
 use mcp_types::JSONRPC_VERSION;
 use mcp_types::JSONRPCMessage;
 use mcp_types::JSONRPCNotification;
 use mcp_types::JSONRPCRequest;
 use mcp_types::JSONRPCResponse;
-use mcp_types::McpClientInfo;
 use mcp_types::ModelContextProtocolNotification;
 use mcp_types::ModelContextProtocolRequest;
 use mcp_types::RequestId;
@@ -111,7 +110,7 @@ impl McpProcess {
                 roots: None,
                 sampling: None,
             },
-            client_info: McpClientInfo {
+            client_info: Implementation {
                 name: "elicitation test".into(),
                 title: Some("Elicitation Test".into()),
                 version: "0.0.0".into(),
@@ -129,14 +128,6 @@ impl McpProcess {
         .await?;
 
         let initialized = self.read_jsonrpc_message().await?;
-        let os_info = os_info::get();
-        let user_agent = format!(
-            "codex_cli_rs/0.0.0 ({} {}; {}) {} (elicitation test; 0.0.0)",
-            os_info.os_type(),
-            os_info.version(),
-            os_info.architecture().unwrap_or("unknown"),
-            codex_core::terminal::user_agent()
-        );
         assert_eq!(
             JSONRPCMessage::Response(JSONRPCResponse {
                 jsonrpc: JSONRPC_VERSION.into(),
@@ -150,8 +141,7 @@ impl McpProcess {
                     "serverInfo": {
                         "name": "codex-mcp-server",
                         "title": "Codex",
-                        "version": "0.0.0",
-                        "user_agent": user_agent
+                        "version": "0.0.0"
                     },
                     "protocolVersion": mcp_types::MCP_SCHEMA_VERSION
                 })
@@ -194,15 +184,6 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("newConversation", params).await
-    }
-
-    /// Send an `archiveConversation` JSON-RPC request.
-    pub async fn send_archive_conversation_request(
-        &mut self,
-        params: ArchiveConversationParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("archiveConversation", params).await
     }
 
     /// Send an `addConversationListener` JSON-RPC request.

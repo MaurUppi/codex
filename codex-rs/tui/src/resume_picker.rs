@@ -2,6 +2,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use chrono::DateTime;
+use chrono::TimeZone;
 use chrono::Utc;
 use codex_core::ConversationItem;
 use codex_core::ConversationsPage;
@@ -254,10 +255,19 @@ impl PickerState {
 }
 
 fn to_rows(page: ConversationsPage) -> Vec<Row> {
-    page.items.into_iter().map(|it| head_to_row(&it)).collect()
+    use std::cmp::Reverse;
+    let mut rows: Vec<Row> = page
+        .items
+        .into_iter()
+        .filter_map(|it| head_to_row(&it))
+        .collect();
+    // Ensure newest-first ordering within the page by timestamp when available.
+    let epoch = Utc.timestamp_opt(0, 0).single().unwrap_or_else(Utc::now);
+    rows.sort_by_key(|r| Reverse(r.ts.unwrap_or(epoch)));
+    rows
 }
 
-fn head_to_row(item: &ConversationItem) -> Row {
+fn head_to_row(item: &ConversationItem) -> Option<Row> {
     let mut ts: Option<DateTime<Utc>> = None;
     if let Some(first) = item.head.first()
         && let Some(t) = first.get("timestamp").and_then(|v| v.as_str())
@@ -266,16 +276,16 @@ fn head_to_row(item: &ConversationItem) -> Row {
         ts = Some(parsed.with_timezone(&Utc));
     }
 
-    let preview = preview_from_head(&item.head)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| String::from("(no message yet)"));
-
-    Row {
+    let preview = preview_from_head(&item.head)?;
+    let preview = preview.trim().to_string();
+    if preview.is_empty() {
+        return None;
+    }
+    Some(Row {
         path: item.path.clone(),
         preview,
         ts,
-    }
+    })
 }
 
 fn preview_from_head(head: &[serde_json::Value]) -> Option<String> {
@@ -473,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn to_rows_preserves_backend_order() {
+    fn to_rows_sorts_descending_by_timestamp() {
         // Construct two items with different timestamps and real user text.
         let a = ConversationItem {
             path: PathBuf::from("/tmp/a.jsonl"),
@@ -490,8 +500,8 @@ mod tests {
             reached_scan_cap: false,
         });
         assert_eq!(rows.len(), 2);
-        // Preserve the given order; backend already provides newest-first
-        assert!(rows[0].preview.contains('A'));
-        assert!(rows[1].preview.contains('B'));
+        // Expect the newer timestamp (B) first
+        assert!(rows[0].preview.contains('B'));
+        assert!(rows[1].preview.contains('A'));
     }
 }

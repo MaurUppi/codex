@@ -43,7 +43,6 @@ pub use model_provider_info::create_oss_provider_with_base_url;
 mod conversation_manager;
 mod event_mapping;
 pub use conversation_manager::ConversationManager;
-pub use conversation_manager::InitialHistory;
 pub use conversation_manager::NewConversation;
 // Re-export common auth types for workspace consumers
 pub use auth::AuthManager;
@@ -62,9 +61,7 @@ pub mod spawn;
 pub mod terminal;
 mod tool_apply_patch;
 pub mod turn_diff_tracker;
-pub use rollout::ARCHIVED_SESSIONS_SUBDIR;
 pub use rollout::RolloutRecorder;
-pub use rollout::SESSIONS_SUBDIR;
 pub use rollout::SessionMeta;
 pub use rollout::list::ConversationItem;
 pub use rollout::list::ConversationsPage;

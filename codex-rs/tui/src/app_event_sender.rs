@@ -4,12 +4,12 @@ use crate::app_event::AppEvent;
 use crate::session_log;
 
 #[derive(Clone, Debug)]
-pub(crate) struct AppEventSender {
+pub struct AppEventSender {
     pub app_event_tx: UnboundedSender<AppEvent>,
 }
 
 impl AppEventSender {
-    pub(crate) fn new(app_event_tx: UnboundedSender<AppEvent>) -> Self {
+    pub fn new(app_event_tx: UnboundedSender<AppEvent>) -> Self {
         Self { app_event_tx }
     }
 

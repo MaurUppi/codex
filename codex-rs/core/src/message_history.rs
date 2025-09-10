@@ -20,6 +20,8 @@ use std::io::Result;
 use std::io::Write;
 use std::path::PathBuf;
 
+use fd_lock::RwLock;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -105,26 +107,27 @@ pub(crate) async fn append_entry(
         options.mode(0o600);
     }
 
-    let mut history_file = options.open(&path)?;
+    let history_file = options.open(&path)?;
 
     // Ensure permissions.
     ensure_owner_only_permissions(&history_file).await?;
 
-    // Perform a blocking write under an advisory write lock using std::fs.
+    // Perform a blocking write under an advisory write lock using fd-lock.
     tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut lock = RwLock::new(history_file);
         // Retry a few times to avoid indefinite blocking when contended.
         for _ in 0..MAX_RETRIES {
-            match history_file.try_lock() {
-                Ok(()) => {
+            match lock.try_write() {
+                Ok(mut guard) => {
                     // While holding the exclusive lock, write the full line.
-                    history_file.write_all(line.as_bytes())?;
-                    history_file.flush()?;
+                    guard.write_all(line.as_bytes())?;
+                    guard.flush()?;
                     return Ok(());
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(RETRY_SLEEP);
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         }
 
@@ -215,12 +218,11 @@ pub(crate) fn lookup(log_id: u64, offset: usize, config: &Config) -> Option<Hist
 
     // Open & lock file for reading using a shared lock.
     // Retry a few times to avoid indefinite blocking.
+    let lock = RwLock::new(file);
     for _ in 0..MAX_RETRIES {
-        let lock_result = file.try_lock_shared();
-
-        match lock_result {
-            Ok(()) => {
-                let reader = BufReader::new(&file);
+        match lock.try_read() {
+            Ok(guard) => {
+                let reader = BufReader::new(&*guard);
                 for (idx, line_res) in reader.lines().enumerate() {
                     let line = match line_res {
                         Ok(l) => l,
@@ -243,7 +245,7 @@ pub(crate) fn lookup(log_id: u64, offset: usize, config: &Config) -> Option<Hist
                 // Not found at requested offset.
                 return None;
             }
-            Err(std::fs::TryLockError::WouldBlock) => {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(RETRY_SLEEP);
             }
             Err(e) => {

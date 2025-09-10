@@ -38,6 +38,7 @@ use crate::bottom_pane::textarea::TextAreaState;
 use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
 use crate::key_hint;
+use crate::statusengine::StatusEngineOutput;
 use codex_file_search::FileMatch;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -64,7 +65,7 @@ struct AttachedImage {
     path: PathBuf,
 }
 
-pub(crate) struct ChatComposer {
+pub struct ChatComposer {
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
     active_popup: ActivePopup,
@@ -86,6 +87,9 @@ pub(crate) struct ChatComposer {
     // When true, disables paste-burst logic and inserts characters immediately.
     disable_paste_burst: bool,
     custom_prompts: Vec<CustomPrompt>,
+    /// StatusEngine output for footer display
+    statusengine_output: Option<StatusEngineOutput>,
+    statusengine_enabled: bool,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -102,6 +106,25 @@ impl ChatComposer {
         enhanced_keys_supported: bool,
         placeholder_text: String,
         disable_paste_burst: bool,
+        statusengine_enabled: bool,
+    ) -> Self {
+        Self::new_with_statusengine(
+            has_input_focus,
+            app_event_tx,
+            enhanced_keys_supported,
+            placeholder_text,
+            disable_paste_burst,
+            statusengine_enabled,
+        )
+    }
+
+    pub fn new_with_statusengine(
+        has_input_focus: bool,
+        app_event_tx: AppEventSender,
+        enhanced_keys_supported: bool,
+        placeholder_text: String,
+        disable_paste_burst: bool,
+        statusengine_enabled: bool,
     ) -> Self {
         let use_shift_enter_hint = enhanced_keys_supported;
 
@@ -125,6 +148,8 @@ impl ChatComposer {
             paste_burst: PasteBurst::default(),
             disable_paste_burst: false,
             custom_prompts: Vec::new(),
+            statusengine_output: None,
+            statusengine_enabled,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -134,7 +159,13 @@ impl ChatComposer {
     pub fn desired_height(&self, width: u16) -> u16 {
         self.textarea.desired_height(width - 1)
             + match &self.active_popup {
-                ActivePopup::None => 1u16,
+                ActivePopup::None => {
+                    if self.statusengine_enabled {
+                        3u16 // Line 1 (hints) + Line 2 + Line 3 (StatusEngine)
+                    } else {
+                        1u16 // Just Line 1 (hints)
+                    }
+                }
                 ActivePopup::Command(c) => c.calculate_required_height(),
                 ActivePopup::File(c) => c.calculate_required_height(),
             }
@@ -144,7 +175,8 @@ impl ChatComposer {
         let popup_height = match &self.active_popup {
             ActivePopup::Command(popup) => popup.calculate_required_height(),
             ActivePopup::File(popup) => popup.calculate_required_height(),
-            ActivePopup::None => 1,
+            // Reserve space for footer: Line 1 (hints) + Lines 2/3 (StatusEngine) when enabled.
+            ActivePopup::None => if self.statusengine_enabled { 3 } else { 1 },
         };
         let [textarea_rect, _] =
             Layout::vertical([Constraint::Min(1), Constraint::Max(popup_height)]).areas(area);
@@ -1215,6 +1247,94 @@ impl ChatComposer {
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
         self.esc_backtrack_hint = show;
     }
+
+    /// Update StatusEngine output for footer display
+    pub fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
+        self.statusengine_output = output;
+    }
+
+    /// Render StatusEngine lines in the footer
+    fn render_statusengine_lines(&self, area: Rect, buf: &mut Buffer) {
+        if area.height >= 2 {
+            let [line2_rect, line3_rect] =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+
+                if let Some(ref output) = self.statusengine_output {
+                    // Render Line 2 with colorized spans (no emoji)
+                    let make_line2_spans = |text: &str| -> Vec<Span<'static>> {
+                        let mut spans: Vec<Span<'static>> = Vec::new();
+                        let parts: Vec<&str> = text.split(" | ").collect();
+                        for (i, part) in parts.iter().enumerate() {
+                            if i > 0 {
+                                spans.push(Span::raw(" | "));
+                            }
+                            match i {
+                                // Model
+                                0 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Cyan),
+                                )),
+                                // Effort
+                                1 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Blue),
+                                )),
+                                // Workspace
+                                2 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Yellow),
+                                )),
+                                // Git branch (+/-/?) counts possibly included in same segment
+                                3 => {
+                                    let mut first = true;
+                                    for tok in part.split_whitespace() {
+                                        if !first {
+                                            spans.push(Span::raw(" "));
+                                        }
+                                        first = false;
+                                        let style = if tok.starts_with('+') {
+                                            Style::default().fg(Color::Green)
+                                        } else if tok.starts_with('-') {
+                                            Style::default().fg(Color::Red)
+                                        } else if tok.starts_with('?') {
+                                            Style::default().fg(Color::Yellow)
+                                        } else {
+                                            Style::default().fg(Color::Green)
+                                        };
+                                        spans.push(Span::styled(tok.to_string(), style));
+                                    }
+                                }
+                                // Sandbox
+                                4 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Magenta),
+                                )),
+                                // Approval
+                                5 => spans.push(Span::styled(
+                                    (*part).to_string(),
+                                    Style::default().fg(Color::Yellow),
+                                )),
+                                // Any extra items: render dim default
+                                _ => spans.push(Span::raw((*part).to_string())),
+                            }
+                        }
+                        spans
+                    };
+
+                    let line2_spans = make_line2_spans(&output.line2);
+                    Line::from(line2_spans)
+                        .style(Style::default().dim())
+                        .render_ref(line2_rect, buf);
+
+                    // Render Line 3 (optional)
+                    if let Some(ref line3) = output.line3 {
+                        Line::from(line3.clone())
+                            .style(Style::default().dim())
+                            .render_ref(line3_rect, buf);
+                    }
+                }
+        }
+    }
 }
 
 impl WidgetRef for ChatComposer {
@@ -1222,7 +1342,8 @@ impl WidgetRef for ChatComposer {
         let popup_height = match &self.active_popup {
             ActivePopup::Command(popup) => popup.calculate_required_height(),
             ActivePopup::File(popup) => popup.calculate_required_height(),
-            ActivePopup::None => 1,
+            // Reserve space for footer: Line 1 (hints) + Lines 2/3 (StatusEngine) when enabled.
+            ActivePopup::None => if self.statusengine_enabled { 3 } else { 1 },
         };
         let [textarea_rect, popup_rect] =
             Layout::vertical([Constraint::Min(1), Constraint::Max(popup_height)]).areas(area);
@@ -1234,7 +1355,19 @@ impl WidgetRef for ChatComposer {
                 popup.render_ref(popup_rect, buf);
             }
             ActivePopup::None => {
-                let bottom_line_rect = popup_rect;
+                // Split the footer area for Line 1 (hints) and StatusEngine Lines 2/3
+                let (line1_rect, statusengine_rect) = if self.statusengine_enabled {
+                    let rects: [Rect; 2] = Layout::vertical([
+                        Constraint::Length(1), // Line 1 (hints)
+                        Constraint::Length(2), // Lines 2+3 (StatusEngine)
+                    ])
+                    .areas(popup_rect);
+                    (rects[0], Some(rects[1]))
+                } else {
+                    (popup_rect, None)
+                };
+
+                let bottom_line_rect = line1_rect;
                 let mut hint: Vec<Span<'static>> = if self.ctrl_c_quit_hint {
                     let ctrl_c_followup = if self.is_task_running {
                         " to interrupt"
@@ -1306,6 +1439,11 @@ impl WidgetRef for ChatComposer {
                 Line::from(hint)
                     .style(Style::default().dim())
                     .render_ref(bottom_line_rect, buf);
+
+                // Render StatusEngine lines if enabled
+                if let Some(statusengine_rect) = statusengine_rect {
+                    self.render_statusengine_lines(statusengine_rect, buf);
+                }
             }
         }
         let border_style = if self.has_focus {
@@ -1515,6 +1653,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         let needs_redraw = composer.handle_paste("hello".to_string());
@@ -1544,6 +1683,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         // Ensure composer is empty and press Enter.
@@ -1570,6 +1710,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -1605,6 +1746,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -1646,6 +1788,7 @@ mod tests {
                 sender.clone(),
                 false,
                 "Ask Codex to do anything".to_string(),
+                false,
                 false,
             );
 
@@ -1690,6 +1833,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         // Type "/mo" humanlike so paste-burst doesn’t interfere.
@@ -1717,6 +1861,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
@@ -1761,6 +1906,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         // Type the slash command.
@@ -1798,6 +1944,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         type_chars_humanlike(&mut composer, &['/', 'c']);
@@ -1822,6 +1969,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -1857,6 +2005,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -1937,6 +2086,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         // Define test cases: (content, is_large)
@@ -2009,6 +2159,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         // Define test cases: (cursor_position_from_end, expected_pending_count)
@@ -2057,6 +2208,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
         let path = PathBuf::from("/tmp/image1.png");
         composer.attach_image(path.clone(), 32, 16, "PNG");
@@ -2080,6 +2232,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
         let path = PathBuf::from("/tmp/image2.png");
@@ -2105,6 +2258,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
         let path = PathBuf::from("/tmp/image3.png");
@@ -2147,6 +2301,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         // Insert an image placeholder at the start
@@ -2172,6 +2327,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -2220,6 +2376,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         let needs_redraw = composer.handle_paste(tmp_path.to_string_lossy().to_string());
@@ -2241,6 +2398,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -2275,6 +2433,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 
@@ -2320,6 +2479,7 @@ mod tests {
             false,
             "Ask Codex to do anything".to_string(),
             false,
+            false,
         );
 
         let count = LARGE_PASTE_CHAR_THRESHOLD + 1; // > threshold to trigger placeholder
@@ -2351,6 +2511,7 @@ mod tests {
             sender,
             false,
             "Ask Codex to do anything".to_string(),
+            false,
             false,
         );
 

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 mod approval_modal_view;
 mod bottom_pane_view;
-mod chat_composer;
+pub mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
 mod file_search_popup;
@@ -39,6 +39,7 @@ pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
 
 use crate::status_indicator_widget::StatusIndicatorWidget;
+use crate::statusengine::StatusEngineOutput;
 use approval_modal_view::ApprovalModalView;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
@@ -73,6 +74,7 @@ pub(crate) struct BottomPaneParams {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) placeholder_text: String,
     pub(crate) disable_paste_burst: bool,
+    pub(crate) statusengine_enabled: bool,
 }
 
 impl BottomPane {
@@ -86,6 +88,7 @@ impl BottomPane {
                 enhanced_keys_supported,
                 params.placeholder_text,
                 params.disable_paste_burst,
+                params.statusengine_enabled,
             ),
             active_view: None,
             app_event_tx: params.app_event_tx,
@@ -470,6 +473,11 @@ impl BottomPane {
     pub(crate) fn take_recent_submission_images(&mut self) -> Vec<PathBuf> {
         self.composer.take_recent_submission_images()
     }
+
+    /// Update StatusEngine output for footer display
+    pub(crate) fn set_statusengine_output(&mut self, output: Option<StatusEngineOutput>) {
+        self.composer.set_statusengine_output(output);
+    }
 }
 
 impl WidgetRef for &BottomPane {
@@ -519,6 +527,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
         pane.push_approval_request(exec_request());
         assert_eq!(CancellationEvent::Handled, pane.on_ctrl_c());
@@ -539,6 +548,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
 
         // Create an approval modal (active view).
@@ -570,6 +580,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
 
         // Start a running task so the status indicator is active above the composer.
@@ -638,6 +649,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
 
         // Begin a task: show initial status.
@@ -669,6 +681,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
 
         // Activate spinner (status view replaces composer) with no live ring.
@@ -720,6 +733,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            statusengine_enabled: false,
         });
 
         pane.set_task_running(true);

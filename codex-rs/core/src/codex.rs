@@ -7,10 +7,10 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::AuthManager;
 use crate::event_mapping::map_response_item_to_event_messages;
-use crate::rollout::recorder::RolloutItem;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_apply_patch::ApplyPatchAction;
@@ -204,6 +204,9 @@ impl Codex {
             error!("Failed to create session: {e:#}");
             CodexErr::InternalAgentDied
         })?;
+        session
+            .record_initial_history(&turn_context, conversation_history)
+            .await;
         let conversation_id = session.conversation_id;
 
         // This task will run until Op::Shutdown is received.
@@ -289,6 +292,8 @@ pub(crate) struct Session {
     codex_linux_sandbox_exe: Option<PathBuf>,
     user_shell: shell::Shell,
     show_raw_agent_reasoning: bool,
+    /// Monotonic clock origin for computing `since_session_ms`.
+    session_origin: Instant,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -392,7 +397,7 @@ impl Session {
         };
 
         // Error messages to dispatch after SessionConfigured is sent.
-        let mut post_session_configured_error_events = Vec::<Event>::new();
+        let mut post_session_configured_error_events = Vec::<EventMsg>::new();
 
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
@@ -414,7 +419,6 @@ impl Session {
             error!("failed to initialize rollout recorder: {e:#}");
             anyhow::anyhow!("failed to initialize rollout recorder: {e:#}")
         })?;
-        let rollout_path = rollout_recorder.rollout_path.clone();
         // Create the mutable state for the Session.
         let state = State {
             history: ConversationHistory::new(),
@@ -427,10 +431,7 @@ impl Session {
             Err(e) => {
                 let message = format!("Failed to create MCP connection manager: {e:#}");
                 error!("{message}");
-                post_session_configured_error_events.push(Event {
-                    id: INITIAL_SUBMIT_ID.to_owned(),
-                    msg: EventMsg::Error(ErrorEvent { message }),
-                });
+                post_session_configured_error_events.push(EventMsg::Error(ErrorEvent { message }));
                 (McpConnectionManager::default(), Default::default())
             }
         };
@@ -440,10 +441,7 @@ impl Session {
             for (server_name, err) in failed_clients {
                 let message = format!("MCP client for `{server_name}` failed to start: {err:#}");
                 error!("{message}");
-                post_session_configured_error_events.push(Event {
-                    id: INITIAL_SUBMIT_ID.to_owned(),
-                    msg: EventMsg::Error(ErrorEvent { message }),
-                });
+                post_session_configured_error_events.push(EventMsg::Error(ErrorEvent { message }));
             }
         }
 
@@ -488,28 +486,35 @@ impl Session {
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            session_origin: Instant::now(),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
         // If resuming, include converted initial messages in the payload so UIs can render them immediately.
-        let initial_messages = initial_history.get_event_msgs();
-        sess.record_initial_history(&turn_context, initial_history)
-            .await;
+        let initial_messages = match &initial_history {
+            InitialHistory::New => None,
+            InitialHistory::Forked(items) => Some(sess.build_initial_messages(items)),
+            InitialHistory::Resumed(resumed_history) => {
+                Some(sess.build_initial_messages(&resumed_history.history))
+            }
+        };
 
-        let events = std::iter::once(Event {
-            id: INITIAL_SUBMIT_ID.to_owned(),
-            msg: EventMsg::SessionConfigured(SessionConfiguredEvent {
+        // Emit SessionConfigured first (since_session_ms will be ~0),
+        // followed by any startup error messages.
+        sess.emit(
+            INITIAL_SUBMIT_ID.to_owned(),
+            EventMsg::SessionConfigured(SessionConfiguredEvent {
                 session_id: conversation_id,
                 model,
                 history_log_id,
                 history_entry_count,
                 initial_messages,
-                rollout_path,
             }),
-        })
-        .chain(post_session_configured_error_events.into_iter());
-        for event in events {
-            sess.send_event(event).await;
+        )
+        .await;
+
+        for msg in post_session_configured_error_events.into_iter() {
+            sess.emit(INITIAL_SUBMIT_ID.to_owned(), msg).await;
         }
 
         Ok((sess, turn_context))
@@ -539,36 +544,79 @@ impl Session {
     ) {
         match conversation_history {
             InitialHistory::New => {
-                // Build and record initial items (user instructions + environment context)
-                let items = self.build_initial_context(turn_context);
-                self.record_conversation_items(&items).await;
+                self.record_initial_history_new(turn_context).await;
             }
-            InitialHistory::Resumed(_) | InitialHistory::Forked(_) => {
-                let rollout_items = conversation_history.get_rollout_items();
-                let persist = matches!(conversation_history, InitialHistory::Forked(_));
-
-                // Always add response items to conversation history
-                let response_items = conversation_history.get_response_items();
-                if !response_items.is_empty() {
-                    self.record_into_history(&response_items);
-                }
-
-                // If persisting, persist all rollout items as-is (recorder filters)
-                if persist && !rollout_items.is_empty() {
-                    self.persist_rollout_items(&rollout_items).await;
-                }
+            InitialHistory::Forked(items) => {
+                self.record_initial_history_from_items(items).await;
+            }
+            InitialHistory::Resumed(resumed_history) => {
+                self.record_initial_history_from_items(resumed_history.history)
+                    .await;
             }
         }
     }
 
-    /// Persist the event to rollout and send it to clients.
-    pub(crate) async fn send_event(&self, event: Event) {
-        // Persist the event into rollout (recorder filters as needed)
-        let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
-        self.persist_rollout_items(&rollout_items).await;
+    async fn record_initial_history_new(&self, turn_context: &TurnContext) {
+        // record the initial user instructions and environment context,
+        // regardless of whether we restored items.
+        // TODO: Those items shouldn't be "user messages" IMO. Maybe developer messages.
+        let mut conversation_items = Vec::<ResponseItem>::with_capacity(2);
+        if let Some(user_instructions) = turn_context.user_instructions.as_deref() {
+            conversation_items.push(UserInstructions::new(user_instructions.to_string()).into());
+        }
+        conversation_items.push(ResponseItem::from(EnvironmentContext::new(
+            Some(turn_context.cwd.clone()),
+            Some(turn_context.approval_policy),
+            Some(turn_context.sandbox_policy.clone()),
+            Some(self.user_shell.clone()),
+        )));
+        self.record_conversation_items(&conversation_items).await;
+    }
+
+    async fn record_initial_history_from_items(&self, items: Vec<ResponseItem>) {
+        self.record_conversation_items_internal(&items, false).await;
+    }
+
+    /// build the initial messages vector for SessionConfigured by converting
+    /// ResponseItems into EventMsg.
+    fn build_initial_messages(&self, items: &[ResponseItem]) -> Vec<EventMsg> {
+        items
+            .iter()
+            .flat_map(|item| {
+                map_response_item_to_event_messages(item, self.show_raw_agent_reasoning)
+            })
+            .collect()
+    }
+
+    /// Sends the given event to the client and swallows the send event, if
+    /// any, logging it as an error.
+    pub(crate) async fn send_event(&self, mut event: Event) {
+        // Attach timing if missing.
+        if event.since_session_ms.is_none() {
+            event.since_session_ms = Some(self.since_session_ms_now());
+        }
         if let Err(e) = self.tx_event.send(event).await {
             error!("failed to send tool call event: {e}");
         }
+    }
+
+    /// Compute monotonic milliseconds since `session_origin`.
+    fn since_session_ms_now(&self) -> u64 {
+        self.session_origin.elapsed().as_millis() as u64
+    }
+
+    /// Convenience to build an Event with timing set.
+    fn timed_event(&self, id: String, msg: EventMsg) -> Event {
+        Event {
+            id,
+            msg,
+            since_session_ms: Some(self.since_session_ms_now()),
+        }
+    }
+
+    /// Emit a timed Event immediately.
+    async fn emit(&self, id: String, msg: EventMsg) {
+        let _ = self.tx_event.send(self.timed_event(id, msg)).await;
     }
 
     pub async fn request_command_approval(
@@ -590,16 +638,16 @@ impl Session {
             warn!("Overwriting existing pending approval for sub_id: {event_id}");
         }
 
-        let event = Event {
-            id: event_id,
-            msg: EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
+        let event = self.timed_event(
+            event_id,
+            EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
                 call_id,
                 command,
                 cwd,
                 reason,
             }),
-        };
-        self.send_event(event).await;
+        );
+        let _ = self.tx_event.send(event).await;
         rx_approve
     }
 
@@ -622,16 +670,16 @@ impl Session {
             warn!("Overwriting existing pending approval for sub_id: {event_id}");
         }
 
-        let event = Event {
-            id: event_id,
-            msg: EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
+        let event = self.timed_event(
+            event_id,
+            EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                 call_id,
                 changes: convert_apply_patch_to_protocol(action),
                 reason,
                 grant_root,
             }),
-        };
-        self.send_event(event).await;
+        );
+        let _ = self.tx_event.send(event).await;
         rx_approve
     }
 
@@ -655,76 +703,36 @@ impl Session {
         state.approved_commands.insert(cmd);
     }
 
-    /// Records input items: always append to conversation history and
-    /// persist these response items to rollout.
+    /// Records items to both the rollout and the chat completions/ZDR
+    /// transcript, if enabled.
     async fn record_conversation_items(&self, items: &[ResponseItem]) {
-        self.record_into_history(items);
-        self.persist_rollout_response_items(items).await;
+        self.record_conversation_items_internal(items, true).await;
     }
 
-    /// Append ResponseItems to the in-memory conversation history only.
-    fn record_into_history(&self, items: &[ResponseItem]) {
-        self.state
-            .lock_unchecked()
-            .history
-            .record_items(items.iter());
-    }
-
-    async fn persist_rollout_response_items(&self, items: &[ResponseItem]) {
-        let rollout_items: Vec<RolloutItem> = items
-            .iter()
-            .cloned()
-            .map(RolloutItem::ResponseItem)
-            .collect();
-        self.persist_rollout_items(&rollout_items).await;
-    }
-
-    fn build_initial_context(&self, turn_context: &TurnContext) -> Vec<ResponseItem> {
-        let mut items = Vec::<ResponseItem>::with_capacity(2);
-        if let Some(user_instructions) = turn_context.user_instructions.as_deref() {
-            items.push(UserInstructions::new(user_instructions.to_string()).into());
+    async fn record_conversation_items_internal(&self, items: &[ResponseItem], persist: bool) {
+        debug!("Recording items for conversation: {items:?}");
+        if persist {
+            self.record_state_snapshot(items).await;
         }
-        items.push(ResponseItem::from(EnvironmentContext::new(
-            Some(turn_context.cwd.clone()),
-            Some(turn_context.approval_policy),
-            Some(turn_context.sandbox_policy.clone()),
-            Some(self.user_shell.clone()),
-        )));
-        items
+
+        self.state.lock_unchecked().history.record_items(items);
     }
 
-    async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+    async fn record_state_snapshot(&self, items: &[ResponseItem]) {
+        let snapshot = { crate::rollout::SessionStateSnapshot {} };
+
         let recorder = {
             let guard = self.rollout.lock_unchecked();
             guard.as_ref().cloned()
         };
-        if let Some(rec) = recorder
-            && let Err(e) = rec.record_items(items).await
-        {
-            error!("failed to record rollout items: {e:#}");
-        }
-    }
 
-    /// Record a user input item to conversation history and also persist a
-    /// corresponding UserMessage EventMsg to rollout.
-    async fn record_input_and_rollout_usermsg(&self, response_input: &ResponseInputItem) {
-        let response_item: ResponseItem = response_input.clone().into();
-        // Add to conversation history and persist response item to rollout
-        self.record_conversation_items(std::slice::from_ref(&response_item))
-            .await;
-
-        // Derive user message events and persist only UserMessage to rollout
-        let msgs =
-            map_response_item_to_event_messages(&response_item, self.show_raw_agent_reasoning);
-        let user_msgs: Vec<RolloutItem> = msgs
-            .into_iter()
-            .filter_map(|m| match m {
-                EventMsg::UserMessage(ev) => Some(RolloutItem::EventMsg(EventMsg::UserMessage(ev))),
-                _ => None,
-            })
-            .collect();
-        if !user_msgs.is_empty() {
-            self.persist_rollout_items(&user_msgs).await;
+        if let Some(rec) = recorder {
+            if let Err(e) = rec.record_state(snapshot).await {
+                error!("failed to record rollout state: {e:#}");
+            }
+            if let Err(e) = rec.record_items(items).await {
+                error!("failed to record rollout items: {e:#}");
+            }
         }
     }
 
@@ -763,11 +771,8 @@ impl Session {
                     .collect(),
             }),
         };
-        let event = Event {
-            id: sub_id.to_string(),
-            msg,
-        };
-        self.send_event(event).await;
+        let event = self.timed_event(sub_id.to_string(), msg);
+        let _ = self.tx_event.send(event).await;
     }
 
     async fn on_exec_command_end(
@@ -810,11 +815,8 @@ impl Session {
             })
         };
 
-        let event = Event {
-            id: sub_id.to_string(),
-            msg,
-        };
-        self.send_event(event).await;
+        let event = self.timed_event(sub_id.to_string(), msg);
+        let _ = self.tx_event.send(event).await;
 
         // If this is an apply_patch, after we emit the end patch, emit a second event
         // with the full turn diff if there is one.
@@ -822,11 +824,8 @@ impl Session {
             let unified_diff = turn_diff_tracker.get_unified_diff();
             if let Ok(Some(unified_diff)) = unified_diff {
                 let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-                let event = Event {
-                    id: sub_id.into(),
-                    msg,
-                };
-                self.send_event(event).await;
+                let event = self.timed_event(sub_id.into(), msg);
+                let _ = self.tx_event.send(event).await;
             }
         }
     }
@@ -886,23 +885,23 @@ impl Session {
     /// the call‑sites terse so adding more diagnostics does not clutter the
     /// core agent logic.
     async fn notify_background_event(&self, sub_id: &str, message: impl Into<String>) {
-        let event = Event {
-            id: sub_id.to_string(),
-            msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+        let event = self.timed_event(
+            sub_id.to_string(),
+            EventMsg::BackgroundEvent(BackgroundEventEvent {
                 message: message.into(),
             }),
-        };
-        self.send_event(event).await;
+        );
+        let _ = self.tx_event.send(event).await;
     }
 
     async fn notify_stream_error(&self, sub_id: &str, message: impl Into<String>) {
-        let event = Event {
-            id: sub_id.to_string(),
-            msg: EventMsg::StreamError(StreamErrorEvent {
+        let event = self.timed_event(
+            sub_id.to_string(),
+            EventMsg::StreamError(StreamErrorEvent {
                 message: message.into(),
             }),
-        };
-        self.send_event(event).await;
+        );
+        let _ = self.tx_event.send(event).await;
     }
 
     /// Build the full turn input by concatenating the current conversation
@@ -1061,13 +1060,13 @@ impl AgentTask {
         // TOCTOU?
         if !self.handle.is_finished() {
             self.handle.abort();
-            let event = Event {
-                id: self.sub_id,
-                msg: EventMsg::TurnAborted(TurnAbortedEvent { reason }),
-            };
-            let sess = self.sess.clone();
+            let event = self.sess.timed_event(
+                self.sub_id,
+                EventMsg::TurnAborted(TurnAbortedEvent { reason }),
+            );
+            let tx_event = self.sess.tx_event.clone();
             tokio::spawn(async move {
-                sess.send_event(event).await;
+                tx_event.send(event).await.ok();
             });
         }
     }
@@ -1272,8 +1271,8 @@ async fn submission_loop(
 
             Op::GetHistoryEntryRequest { offset, log_id } => {
                 let config = config.clone();
-                let sess_clone = sess.clone();
                 let sub_id = sub.id.clone();
+                let sess2 = sess.clone();
 
                 tokio::spawn(async move {
                     // Run lookup in blocking thread because it does file IO + locking.
@@ -1283,9 +1282,9 @@ async fn submission_loop(
                     .await
                     .unwrap_or(None);
 
-                    let event = Event {
-                        id: sub_id,
-                        msg: EventMsg::GetHistoryEntryResponse(
+                    let event = sess2.timed_event(
+                        sub_id,
+                        EventMsg::GetHistoryEntryResponse(
                             crate::protocol::GetHistoryEntryResponseEvent {
                                 offset,
                                 log_id,
@@ -1298,25 +1297,31 @@ async fn submission_loop(
                                 }),
                             },
                         ),
-                    };
+                    );
 
-                    sess_clone.send_event(event).await;
+                    if let Err(e) = sess2.tx_event.send(event).await {
+                        warn!("failed to send GetHistoryEntryResponse event: {e}");
+                    }
                 });
             }
             Op::ListMcpTools => {
+                let sess2 = sess.clone();
                 let sub_id = sub.id.clone();
 
                 // This is a cheap lookup from the connection manager's cache.
                 let tools = sess.mcp_connection_manager.list_all_tools();
-                let event = Event {
-                    id: sub_id,
-                    msg: EventMsg::McpListToolsResponse(
-                        crate::protocol::McpListToolsResponseEvent { tools },
-                    ),
-                };
-                sess.send_event(event).await;
+                let event = sess2.timed_event(
+                    sub_id,
+                    EventMsg::McpListToolsResponse(crate::protocol::McpListToolsResponseEvent {
+                        tools,
+                    }),
+                );
+                if let Err(e) = sess2.tx_event.send(event).await {
+                    warn!("failed to send McpListToolsResponse event: {e}");
+                }
             }
             Op::ListCustomPrompts => {
+                let sess2 = sess.clone();
                 let sub_id = sub.id.clone();
 
                 let custom_prompts: Vec<CustomPrompt> =
@@ -1326,13 +1331,15 @@ async fn submission_loop(
                         Vec::new()
                     };
 
-                let event = Event {
-                    id: sub_id,
-                    msg: EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
+                let event = sess2.timed_event(
+                    sub_id,
+                    EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
                         custom_prompts,
                     }),
-                };
-                sess.send_event(event).await;
+                );
+                if let Err(e) = sess2.tx_event.send(event).await {
+                    warn!("failed to send ListCustomPromptsResponse event: {e}");
+                }
             }
             Op::Compact => {
                 // Create a summarization request as user input
@@ -1362,33 +1369,37 @@ async fn submission_loop(
                     && let Err(e) = rec.shutdown().await
                 {
                     warn!("failed to shutdown rollout recorder: {e}");
-                    let event = Event {
-                        id: sub.id.clone(),
-                        msg: EventMsg::Error(ErrorEvent {
+                    let event = sess.timed_event(
+                        sub.id.clone(),
+                        EventMsg::Error(ErrorEvent {
                             message: "Failed to shutdown rollout recorder".to_string(),
                         }),
-                    };
-                    sess.send_event(event).await;
+                    );
+                    if let Err(e) = sess.tx_event.send(event).await {
+                        warn!("failed to send error message: {e:?}");
+                    }
                 }
 
-                let event = Event {
-                    id: sub.id.clone(),
-                    msg: EventMsg::ShutdownComplete,
-                };
-                sess.send_event(event).await;
+                let event = sess.timed_event(sub.id.clone(), EventMsg::ShutdownComplete);
+                if let Err(e) = sess.tx_event.send(event).await {
+                    warn!("failed to send Shutdown event: {e}");
+                }
                 break;
             }
             Op::GetHistory => {
+                let sess2 = sess.clone();
                 let sub_id = sub.id.clone();
 
-                let event = Event {
-                    id: sub_id.clone(),
-                    msg: EventMsg::ConversationHistory(ConversationHistoryResponseEvent {
-                        conversation_id: sess.conversation_id,
-                        entries: sess.state.lock_unchecked().history.contents(),
+                let event = sess2.timed_event(
+                    sub_id.clone(),
+                    EventMsg::ConversationHistory(ConversationHistoryResponseEvent {
+                        conversation_id: sess2.conversation_id,
+                        entries: sess2.state.lock_unchecked().history.contents(),
                     }),
-                };
-                sess.send_event(event).await;
+                );
+                if let Err(e) = sess2.tx_event.send(event).await {
+                    warn!("failed to send ConversationHistory event: {e}");
+                }
             }
             _ => {
                 // Ignore unknown ops; enum is non_exhaustive to allow extensions.
@@ -1420,16 +1431,18 @@ async fn run_task(
     if input.is_empty() {
         return;
     }
-    let event = Event {
-        id: sub_id.clone(),
-        msg: EventMsg::TaskStarted(TaskStartedEvent {
+    let event = sess.timed_event(
+        sub_id.clone(),
+        EventMsg::TaskStarted(TaskStartedEvent {
             model_context_window: turn_context.client.get_model_context_window(),
         }),
-    };
-    sess.send_event(event).await;
+    );
+    if sess.tx_event.send(event).await.is_err() {
+        return;
+    }
 
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    sess.record_input_and_rollout_usermsg(&initial_input_for_turn)
+    sess.record_conversation_items(&[initial_input_for_turn.clone().into()])
         .await;
 
     let mut last_agent_message: Option<String> = None;
@@ -1592,24 +1605,24 @@ async fn run_task(
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
-                let event = Event {
-                    id: sub_id.clone(),
-                    msg: EventMsg::Error(ErrorEvent {
+                let event = sess.timed_event(
+                    sub_id.clone(),
+                    EventMsg::Error(ErrorEvent {
                         message: e.to_string(),
                     }),
-                };
-                sess.send_event(event).await;
+                );
+                sess.tx_event.send(event).await.ok();
                 // let the user continue the conversation
                 break;
             }
         }
     }
     sess.remove_task(&sub_id);
-    let event = Event {
-        id: sub_id,
-        msg: EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }),
-    };
-    sess.send_event(event).await;
+    let event = sess.timed_event(
+        sub_id,
+        EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }),
+    );
+    sess.tx_event.send(event).await.ok();
 }
 
 async fn run_turn(
@@ -1787,10 +1800,10 @@ async fn try_run_turn(
             ResponseEvent::WebSearchCallBegin { call_id } => {
                 let _ = sess
                     .tx_event
-                    .send(Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::WebSearchBegin(WebSearchBeginEvent { call_id }),
-                    })
+                    .send(sess.timed_event(
+                        sub_id.to_string(),
+                        EventMsg::WebSearchBegin(WebSearchBeginEvent { call_id }),
+                    ))
                     .await;
             }
             ResponseEvent::Completed {
@@ -1807,12 +1820,13 @@ async fn try_run_turn(
                     st.token_info = info.clone();
                     info
                 };
-                let _ = sess
-                    .send_event(Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
-                    })
-                    .await;
+                sess.tx_event
+                    .send(sess.timed_event(
+                        sub_id.to_string(),
+                        EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
+                    ))
+                    .await
+                    .ok();
 
                 let unified_diff = turn_diff_tracker.get_unified_diff();
                 if let Ok(Some(unified_diff)) = unified_diff {
@@ -1820,42 +1834,43 @@ async fn try_run_turn(
                     let event = Event {
                         id: sub_id.to_string(),
                         msg,
+                        since_session_ms: None, // Will be filled by send_event
                     };
-                    sess.send_event(event).await;
+                    let _ = sess.tx_event.send(event).await;
                 }
 
                 return Ok(output);
             }
             ResponseEvent::OutputTextDelta(delta) => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
-                };
-                sess.send_event(event).await;
+                let event = sess.timed_event(
+                    sub_id.to_string(),
+                    EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }),
+                );
+                sess.tx_event.send(event).await.ok();
             }
             ResponseEvent::ReasoningSummaryDelta(delta) => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
-                };
-                sess.send_event(event).await;
+                let event = sess.timed_event(
+                    sub_id.to_string(),
+                    EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }),
+                );
+                sess.tx_event.send(event).await.ok();
             }
             ResponseEvent::ReasoningSummaryPartAdded => {
-                let event = Event {
-                    id: sub_id.to_string(),
-                    msg: EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {}),
-                };
-                sess.send_event(event).await;
+                let event = sess.timed_event(
+                    sub_id.to_string(),
+                    EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {}),
+                );
+                sess.tx_event.send(event).await.ok();
             }
             ResponseEvent::ReasoningContentDelta(delta) => {
                 if sess.show_raw_agent_reasoning {
-                    let event = Event {
-                        id: sub_id.to_string(),
-                        msg: EventMsg::AgentReasoningRawContentDelta(
+                    let event = sess.timed_event(
+                        sub_id.to_string(),
+                        EventMsg::AgentReasoningRawContentDelta(
                             AgentReasoningRawContentDeltaEvent { delta },
                         ),
-                    };
-                    sess.send_event(event).await;
+                    );
+                    sess.tx_event.send(event).await.ok();
                 }
             }
         }
@@ -1870,13 +1885,15 @@ async fn run_compact_task(
     compact_instructions: String,
 ) {
     let model_context_window = turn_context.client.get_model_context_window();
-    let start_event = Event {
-        id: sub_id.clone(),
-        msg: EventMsg::TaskStarted(TaskStartedEvent {
+    let start_event = sess.timed_event(
+        sub_id.clone(),
+        EventMsg::TaskStarted(TaskStartedEvent {
             model_context_window,
         }),
-    };
-    sess.send_event(start_event).await;
+    );
+    if sess.tx_event.send(start_event).await.is_err() {
+        return;
+    }
 
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
     let turn_input: Vec<ResponseItem> =
@@ -1916,6 +1933,7 @@ async fn run_compact_task(
                         msg: EventMsg::Error(ErrorEvent {
                             message: e.to_string(),
                         }),
+                        since_session_ms: None,
                     };
                     sess.send_event(event).await;
                     return;
@@ -1936,6 +1954,7 @@ async fn run_compact_task(
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "Compact task completed".to_string(),
         }),
+        since_session_ms: None,
     };
     sess.send_event(event).await;
     let event = Event {
@@ -1943,6 +1962,7 @@ async fn run_compact_task(
         msg: EventMsg::TaskComplete(TaskCompleteEvent {
             last_agent_message: None,
         }),
+        since_session_ms: None,
     };
     sess.send_event(event).await;
 }
@@ -2053,8 +2073,9 @@ async fn handle_response_item(
                 let event = Event {
                     id: sub_id.to_string(),
                     msg,
+                    since_session_ms: None,
                 };
-                sess.send_event(event).await;
+                sess.tx_event.send(event).await.ok();
             }
             None
         }
@@ -2903,6 +2924,7 @@ async fn drain_to_completed(
                     .send(Event {
                         id: sub_id.to_string(),
                         msg: EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
+                        since_session_ms: None,
                     })
                     .await
                     .ok();

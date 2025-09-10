@@ -77,6 +77,7 @@ async fn notify_mcp_tool_call_event(sess: &Session, sub_id: &str, event: EventMs
     sess.send_event(Event {
         id: sub_id.to_string(),
         msg: event,
+        since_session_ms: None,
     })
     .await;
 }

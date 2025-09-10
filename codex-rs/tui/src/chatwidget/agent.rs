@@ -40,6 +40,7 @@ pub(crate) fn spawn_agent(
             // The `id` does not matter for rendering, so we can use a fake value.
             id: "".to_string(),
             msg: codex_core::protocol::EventMsg::SessionConfigured(session_configured),
+            since_session_ms: None,
         };
         app_event_tx_clone.send(AppEvent::CodexEvent(ev));
 
@@ -77,6 +78,7 @@ pub(crate) fn spawn_agent_from_existing(
         let ev = codex_core::protocol::Event {
             id: "".to_string(),
             msg: codex_core::protocol::EventMsg::SessionConfigured(session_configured),
+            since_session_ms: Some(0),
         };
         app_event_tx_clone.send(AppEvent::CodexEvent(ev));
 

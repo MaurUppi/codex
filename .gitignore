@@ -81,3 +81,9 @@ CHANGELOG.ignore.md
 # nix related
 .direnv
 .envrc
+project/
+.serena/
+.idea/
+# StatusEngine debug artifacts
+.statusengine-debug/
+**/.statusengine-debug/

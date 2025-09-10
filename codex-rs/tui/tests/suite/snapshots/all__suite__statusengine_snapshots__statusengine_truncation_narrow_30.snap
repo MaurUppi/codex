@@ -1,0 +1,6 @@
+---
+source: tui/tests/suite/statusengine_snapshots.rs
+assertion_line: 166
+expression: narrow
+---
+▌                              ⏎ send   ⇧⏎ newline   ⌃T tran

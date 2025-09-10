@@ -1,0 +1,6 @@
+---
+source: tui/tests/suite/statusengine_snapshots.rs
+assertion_line: 270
+expression: result
+---
+▌                         ⏎ send   ⇧⏎ newline   ⌃T

@@ -27,10 +27,10 @@ use tracing_subscriber::prelude::*;
 
 mod app;
 mod app_backtrack;
-mod app_event;
-mod app_event_sender;
+pub mod app_event;
+pub mod app_event_sender;
 mod backtrack_helpers;
-mod bottom_pane;
+pub mod bottom_pane;
 mod chatwidget;
 mod citation_regex;
 mod cli;
@@ -54,6 +54,7 @@ mod session_log;
 mod shimmer;
 mod slash_command;
 mod status_indicator_widget;
+pub mod statusengine;
 mod streaming;
 mod text_formatting;
 mod tui;
@@ -312,7 +313,11 @@ async fn run_ratatui_app(
         ..
     } = cli;
 
-    let auth_manager = AuthManager::shared(config.codex_home.clone(), config.preferred_auth_method);
+    let auth_manager = AuthManager::shared(
+        config.codex_home.clone(),
+        config.preferred_auth_method,
+        config.responses_originator_header.clone(),
+    );
     let login_status = get_login_status(&config);
     let should_show_onboarding =
         should_show_onboarding(login_status, &config, should_show_trust_screen);
@@ -396,7 +401,11 @@ fn get_login_status(config: &Config) -> LoginStatus {
         // Reading the OpenAI API key is an async operation because it may need
         // to refresh the token. Block on it.
         let codex_home = config.codex_home.clone();
-        match CodexAuth::from_codex_home(&codex_home, config.preferred_auth_method) {
+        match CodexAuth::from_codex_home(
+            &codex_home,
+            config.preferred_auth_method,
+            &config.responses_originator_header,
+        ) {
             Ok(Some(auth)) => LoginStatus::AuthMode(auth.mode),
             Ok(None) => LoginStatus::NotAuthenticated,
             Err(err) => {

@@ -628,6 +628,7 @@ dependencies = [
  "dirs",
  "env-flags",
  "eventsource-stream",
+ "fd-lock",
  "futures",
  "landlock",
  "libc",
@@ -785,7 +786,6 @@ dependencies = [
  "codex-protocol",
  "mcp-types",
  "mcp_test_support",
- "os_info",
  "pretty_assertions",
  "schemars 0.8.22",
  "serde",
@@ -831,7 +831,6 @@ dependencies = [
  "strum 0.27.2",
  "strum_macros 0.27.2",
  "sys-locale",
- "tempfile",
  "tracing",
  "ts-rs",
  "uuid",
@@ -844,7 +843,6 @@ dependencies = [
  "anyhow",
  "clap",
  "codex-protocol",
- "mcp-types",
  "ts-rs",
 ]
 
@@ -899,6 +897,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.1.14",
  "url",
+ "uuid",
  "vt100",
 ]
 
@@ -2682,11 +2681,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "codex-core",
  "codex-mcp-server",
  "codex-protocol",
  "mcp-types",
- "os_info",
  "pretty_assertions",
  "serde",
  "serde_json",

@@ -1,0 +1,6 @@
+---
+source: tui/tests/suite/statusengine_snapshots.rs
+assertion_line: 172
+expression: wide
+---
+▌                                                                                                    ⏎ send   ⇧⏎ newline   ⌃T transcript   ⌃C quit
