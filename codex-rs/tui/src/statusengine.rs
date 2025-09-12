@@ -1,6 +1,7 @@
 //! StatusEngine - Manages TUI footer status display with timing, git info, and external providers.
 
-use ratatui::style::{Color, Stylize};
+use ratatui::style::Color;
+use ratatui::style::Stylize;
 use serde_json;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -12,7 +13,8 @@ use tokio::time::timeout;
 use tracing;
 
 // Import git helpers for branch and diff count information
-use codex_core::git_info::{collect_git_info, working_diff_counts};
+use codex_core::git_info::collect_git_info;
+use codex_core::git_info::working_diff_counts;
 
 /// Configuration for the StatusEngine
 #[derive(Debug, Clone)]
@@ -145,14 +147,18 @@ impl StatusEngine {
     /// Respects the 300ms throttle for external provider calls
     pub async fn tick(&mut self, now: Instant) -> StatusEngineOutput {
         tracing::debug!("StatusEngine tick() called at {:?}", now);
-        
+
         // Update git information before building Line 2
         self.update_git_info().await;
-        
+
         let line2 = self.build_line2();
         let line3 = self.maybe_run_command_provider(now).await;
-        
-        tracing::debug!("StatusEngine tick() returning: line2='{}', line3={:?}", line2, line3);
+
+        tracing::debug!(
+            "StatusEngine tick() returning: line2='{}', line3={:?}",
+            line2,
+            line3
+        );
 
         StatusEngineOutput { line2, line3 }
     }
@@ -165,7 +171,7 @@ impl StatusEngine {
             if let Some(git_info) = collect_git_info(cwd).await {
                 self.state.git_branch = git_info.branch;
             }
-            
+
             // Get diff counts (+added, -removed) against HEAD
             if let Some((added, removed)) = working_diff_counts(cwd).await {
                 self.state.git_counts = Some(format!("+{added} -{removed}"));
@@ -180,11 +186,18 @@ impl StatusEngine {
     /// Made public for testing purposes
     pub fn build_line2(&self) -> String {
         let mut parts = Vec::new();
-        
+
         // Debug: Log current state
-        tracing::debug!("StatusEngine building Line 2 with state: model={:?}, effort={:?}, workspace={:?}, git_branch={:?}, git_counts={:?}, sandbox={:?}, approval={:?}",
-            self.state.model, self.state.effort, self.state.workspace_name, 
-            self.state.git_branch, self.state.git_counts, self.state.sandbox, self.state.approval);
+        tracing::debug!(
+            "StatusEngine building Line 2 with state: model={:?}, effort={:?}, workspace={:?}, git_branch={:?}, git_counts={:?}, sandbox={:?}, approval={:?}",
+            self.state.model,
+            self.state.effort,
+            self.state.workspace_name,
+            self.state.git_branch,
+            self.state.git_counts,
+            self.state.sandbox,
+            self.state.approval
+        );
 
         for item in &self.line2_items {
             match item {
@@ -232,7 +245,11 @@ impl StatusEngine {
             String::new()
         } else {
             let result = Self::style_status_line(parts.join(" | "));
-            tracing::debug!("StatusEngine Line 2 built: '{}' from {} parts", result, parts.len());
+            tracing::debug!(
+                "StatusEngine Line 2 built: '{}' from {} parts",
+                result,
+                parts.len()
+            );
             result
         }
     }

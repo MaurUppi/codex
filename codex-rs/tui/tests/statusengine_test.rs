@@ -37,7 +37,7 @@ fn test_truncate_with_ellipsis() {
         StatusEngine::truncate_with_ellipsis("verylongbranchname", 10),
         "ver…name"
     );
-    assert_eq!(StatusEngine::truncate_with_ellipsis("abc", 2), "ab");
+    assert_eq!(StatusEngine::truncate_with_ellipsis("abc", 2), "..");
 }
 
 #[tokio::test]

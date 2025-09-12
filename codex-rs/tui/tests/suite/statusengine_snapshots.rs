@@ -52,8 +52,9 @@ fn render_statusengine_footer(
 ) -> String {
     let composer = create_test_chat_composer(output);
     let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend)
-        .unwrap_or_else(|e| panic!("Failed to create test terminal for StatusEngine rendering: {e}"));
+    let mut terminal = Terminal::new(backend).unwrap_or_else(|e| {
+        panic!("Failed to create test terminal for StatusEngine rendering: {e}")
+    });
 
     terminal
         .draw(|f| {
@@ -216,10 +217,7 @@ async fn test_statusengine_chatcomposer_integration() {
         !output.line2.is_empty(),
         "Line2 should contain status information"
     );
-    assert!(
-        output.line2.contains("gpt5"),
-        "Should contain model name"
-    );
+    assert!(output.line2.contains("gpt5"), "Should contain model name");
     assert!(
         output.line2.contains("feat/statusengine"),
         "Should contain branch name"
